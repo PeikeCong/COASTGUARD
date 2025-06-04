@@ -1,6 +1,7 @@
 # first clone and cd coastguard
 # git clone https://github.com/fmemuir/COASTGUARD.git
 
+===== NEW CLOUD SET UP ====
 conda create -n coastguard python=3.10
 conda activate coastguard
 
@@ -12,8 +13,13 @@ conda install ipywidgets -c conda-forge
 conda install ipympl -c conda-forge
 conda install fiona=1.9.4 shapely=2.0.1 pyproj=3.5.0 -c conda-forge
 
+conda install -c conda-forge nodejs
+
+jupyter labextension install @jupyter-widgets/jupyterlab-manager
+jupyter labextension install jupyter-matplotlib
 
 
+==== ====
 
 cd COASTGUARD
 
