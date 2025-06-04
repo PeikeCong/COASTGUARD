@@ -10,6 +10,8 @@ python -m ipykernel install --user --name coastguard --display-name "conda_coast
 conda install ipywidgets -c conda-forge
 
 conda install ipympl -c conda-forge
+conda install fiona=1.9.4 shapely=2.0.1 pyproj=3.5.0 -c conda-forge
+
 
 
 
