@@ -1,9 +1,20 @@
 # first clone and cd coastguard
 # git clone https://github.com/fmemuir/COASTGUARD.git
 
-cd SageMaker/COASTGUARD
+conda create -n coastguard python=3.10
+conda activate coastguard
 
-bash
+conda env update --name coastguard --file coastguard_env.yml
+
+python -m ipykernel install --user --name coastguard --display-name "conda_coastguard"
+conda install ipywidgets -c conda-forge
+
+conda install ipympl -c conda-forge
+
+
+
+cd COASTGUARD
+
 
 conda env create --file coastguard_env.yml 
 
