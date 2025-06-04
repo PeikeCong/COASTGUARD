@@ -1820,7 +1820,13 @@ def show_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, image_epsg, geor
         fig = plt.figure()
         fig.set_size_inches([18, 9])
         mng = plt.get_current_fig_manager()
-        mng.window.showMaximized()
+        if hasattr(mng, 'window'):
+            try:
+                mng.window.showMaximized()
+            except Exception as e:
+                print(f"Warning: Could not maximize window — {e}")
+        else:
+            print("No window attribute in the figure manager; running in headless mode.")
         # according to the image shape, decide whether it is better to have the images
         # in vertical subplots or horizontal subplots
         if im_RGB.shape[1] > 2.5*im_RGB.shape[0]:
@@ -1994,7 +2000,13 @@ def adjust_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, vegline, vegli
         fig = plt.figure()
         fig.set_size_inches([18, 9])
         mng = plt.get_current_fig_manager()
-        mng.window.showMaximized()
+        if hasattr(mng, 'window'):
+            try:
+                mng.window.showMaximized()
+            except Exception as e:
+                print(f"Warning: Could not maximize window — {e}")
+        else:
+            print("No window attribute in the figure manager; running in headless mode.")
         # according to the image shape, decide whether it is better to have the images
         # in vertical subplots or horizontal subplots
         if im_RGB.shape[1] > 2.5*im_RGB.shape[0]:
