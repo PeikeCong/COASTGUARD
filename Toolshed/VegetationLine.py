@@ -1005,6 +1005,13 @@ def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
 
     # threshold the sand/water intensities
     int_all = np.append(int_water,int_nonwater, axis=0)
+    
+    # NEW: remove NaNs before thresholding
+    int_all = int_all[~np.isnan(int_all)]
+    if len(int_all) == 0:
+        print("Warning: int_all is empty or all NaN — skipping image")
+        return None, None
+
     t_ndi = filters.threshold_otsu(int_all)
 
     # find contour with Marching-Squares algorithm
