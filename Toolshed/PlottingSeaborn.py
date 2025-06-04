@@ -24,7 +24,7 @@ import seaborn as sns
 import matplotlib as mpl
 from matplotlib import cm
 import matplotlib.colors as pltcls
-mpl.use('Qt5Agg')
+
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib import gridspec

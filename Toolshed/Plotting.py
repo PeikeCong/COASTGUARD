@@ -18,7 +18,6 @@ import pdb
 
 import matplotlib as mpl
 from matplotlib import cm
-mpl.use('Qt5Agg')
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import matplotlib.patches as mpatches
