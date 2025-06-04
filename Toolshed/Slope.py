@@ -7,7 +7,7 @@ from satellite-derived shorelines which avoid effects of dynamic shorefaces.
 COASTGUARD edits and updates: Freya Muir, University of Glasgow
 
 """
-
+from scipy.integrate import simpson
 import numpy as np
 import pytz
 import datetime
@@ -147,7 +147,7 @@ def FreqParams(dates_sat_tr, settings_slope):
 
 
 #%%
-def find_tide_peak(dates, tide_level, settings_slope, Plot=False):
+def find_tide_peak(dates, tide_level, settings_slope, Plot=True):
     'find the high frequency peak in the tidal time-series'
     # set common params
     t, days_in_year, seconds_in_day, time_step, freqs = FreqParams(dates, settings_slope)
@@ -213,11 +213,11 @@ def power_spectrum(t, y, freqs, idx_cut):
     model = LombScargle(t, y, dy=None, fit_mean=True, center_data=True, nterms=1, normalization='psd')
     ps = model.power(freqs)
     # integrate the entire power spectrum
-    E = sintegrate.simps(ps, x=freqs, even='avg')
+    E = sintegrate.simpson(ps, x=freqs)
     if len(idx_cut) == 0:
         idx_cut = np.ones(freqs.size).astype(bool)
     # integrate only frequencies above cut-off
-    Ec = sintegrate.simps(ps[idx_cut], x=freqs[idx_cut], even='avg')
+    Ec = sintegrate.simpson(ps[idx_cut], x=freqs[idx_cut])
     return ps, E, Ec
 
 
@@ -233,7 +233,7 @@ def range_slopes(min_slope, max_slope, delta_slope):
     return beach_slopes
 
 
-def integrate_power_spectrum(dates_rand, tsall, settings_slope, Plot=False):
+def integrate_power_spectrum(dates_rand, tsall, settings_slope, Plot=True):
     'integrate power spectrum at the frequency band of peak tidal signal'
     # set common params
     t, days_in_year, seconds_in_day, time_step, freqs = FreqParams(dates_rand, settings_slope)
@@ -244,7 +244,7 @@ def integrate_power_spectrum(dates_rand, tsall, settings_slope, Plot=False):
     E = np.zeros(beach_slopes.size)
     for i in range(len(tsall)):
         ps, _, _ = power_spectrum(t,tsall[i],freqs,[])
-        E[i] = sintegrate.simps(ps[idx_interval], x=freqs[idx_interval], even='avg')
+        E[i] = sintegrate.simpson(ps[idx_interval], x=freqs[idx_interval])
     # calculate confidence interval
     delta = 0.0001
     prc = settings_slope['prc_conf']
