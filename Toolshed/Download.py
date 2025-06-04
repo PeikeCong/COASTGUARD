@@ -224,7 +224,7 @@ def RetrieveImages(inputs, SLC=True):
             else:
                 Sat.append(Landsat9)
         if 'S2' in inputs['sat_list']:
-            Sentinel2 = ee.ImageCollection("COPERNICUS/S2").filterBounds(point).filterDate(inputs['dates'][0], inputs['dates'][1]).filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', cloud_thresh))
+            Sentinel2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(point).filterDate(inputs['dates'][0], inputs['dates'][1]).filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', cloud_thresh))
             if Sentinel2.size().getInfo() == 0:
                 inputs['sat_list'].remove('S2')
             else:
