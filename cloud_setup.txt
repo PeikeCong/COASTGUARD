@@ -1,0 +1,34 @@
+# first clone and cd coastguard
+# git clone https://github.com/fmemuir/COASTGUARD.git
+
+cd SageMaker/COASTGUARD
+
+bash
+
+conda env create --file coastguard_env.yml 
+
+conda activate coastguard
+
+conda install pyfes -c fbriol -c conda-forge
+
+conda install -c conda-forge earthengine-api pandas=2.0.3 geopandas spyder=5.5.0 geemap scikit-image matplotlib rasterio seaborn astropy geopy notebook netcdf4 arosics utm gdal
+
+
+# gcloud CLI
+curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-455.0.0-linux-x86_64.tar.gz
+tar -xf google-cloud-sdk-455.0.0-linux-x86_64.tar.gz
+./google-cloud-sdk/install.sh
+earthengine authenticate
+
+pip install environment_kernels
+
+
+# Remove the SageMaker-specific login handler config
+jupyter --config-dir
+
+nano ~/.jupyter/jupyter_server_config.py
+# c.ServerApp.login_handler_class = 'sagemaker_nbi_agent.jupyter_overrides.login_handler.SageMakerNotebookLoginHandler'
+# Ctrl + O, Enter, Ctrl + X
+
+python -m ipykernel install --user --name coastguard --display-name "conda_coastguard"
+
