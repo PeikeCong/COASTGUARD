@@ -275,22 +275,28 @@ def LocalImageMetadata(inputs, Sat):
         metadata[inputs['sat_list'][i]] = {'filenames':[], 'acc_georef':[], 'epsg':[], 'dates':[]}
 
     # for i in range(len(Sat[0])):
-    for i in range(1):    
-        for j in range(len(Sat[i])):
-            
-            imdata = rasterio.open(Sat[i][j])
-            
-            metadata[inputs['sat_list'][i]]['filenames'].append(Sat[i][j])
-            
-            metadata[inputs['sat_list'][i]]['acc_georef'].append(list(imdata.transform)[0:6])
-            
-            metadata[inputs['sat_list'][i]]['epsg'].append(str(imdata.crs).lstrip('EPSG:'))
-            
-            date = datetime.strptime(os.path.basename(Sat[i][j])[0:8],'%Y%m%d') #relies on date being YYYYMMDD first in filename
-            metadata[inputs['sat_list'][i]]['dates'].append(str(date.strftime('%Y-%m-%d')))
-            
-            
-            print(inputs['sat_list'][i],": ",(100*(j+1)/len(Sat[i])),'%', end='')
+    # NEW changed to read all the satlist
+    for i in range(len(inputs['sat_list'])):
+            for j in range(len(Sat[i])):
+                img_path = Sat[i][j]
+                imdata = rasterio.open(img_path)
+    
+                # get metadata
+                metadata[inputs['sat_list'][i]]['filenames'].append(img_path)
+                metadata[inputs['sat_list'][i]]['acc_georef'].append(list(imdata.transform)[0:6])
+                metadata[inputs['sat_list'][i]]['epsg'].append(str(imdata.crs).lstrip('EPSG:'))
+    
+                # date information from file name
+                basename = os.path.basename(img_path)
+                try:
+                    date = datetime.strptime(basename[0:8], '%Y%m%d')
+                    metadata[inputs['sat_list'][i]]['dates'].append(str(date.strftime('%Y-%m-%d')))
+                except Exception as e:
+                    print(f"❌ Date extraction failed for {basename}: {e}")
+                    metadata[inputs['sat_list'][i]]['dates'].append(None)
+    
+                # process print out
+                print(f"{inputs['sat_list'][i]}: {(100*(j+1)/len(Sat[i])):.2f}%", end='\r')
     
     with open(os.path.join(filepath, inputs['sitename'] + '_metadata.pkl'), 'wb') as f:
         pickle.dump(metadata, f)
