@@ -681,6 +681,9 @@ def InitialiseImgs(metadata, settings, satname, imgs):
     if satname == 'L5':
         pixel_size = 15
         clf_model = 'MLPClassifier_Veg_L5L8S2.pkl'
+        # NEW patch assign variable
+        init_georef = []
+        ImgColl = []
         ImgColl = ee.ImageCollection.fromImages(imgs).select(['B1','B2','B3','B4','B5','QA_PIXEL'])
         # adjust georeferencing vector to the new image size
         raw_georef = ImgColl.getInfo().get('features')[0]['bands'][0]['crs_transform'] # get georef layout from first img Blue band
@@ -729,10 +732,10 @@ def InitialiseImgs(metadata, settings, satname, imgs):
         print(f"Using initial georef: {init_georef}")
         
     else: # Planet or local
-        pixel_size = metadata[settings['inputs']['sat_list'][0]]['acc_georef'][0][0] #pull first image's pixel size from transform matrix
+        pixel_size = metadata[settings['inputs']['sat_list'][0]]['acc_georef'][0][0] # pull first image's pixel size from transform matrix
         clf_model = 'MLPClassifier_Veg_PSScene.pkl' 
         init_georef = [] # georef gets set by each local image
-        
+        ImgColl = []
     return pixel_size, clf_model, ImgColl, init_georef
         
 

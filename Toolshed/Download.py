@@ -271,37 +271,33 @@ def LocalImageMetadata(inputs, Sat):
     
     metadata = dict([])
 
+    # NEW - because Sat may start with null list
     for i in range(len(inputs['sat_list'])):
+        if len(Sat[i]) == 0:
+            continue  # skip if no images!
+    
         metadata[inputs['sat_list'][i]] = {'filenames':[], 'acc_georef':[], 'epsg':[], 'dates':[]}
-
-    # for i in range(len(Sat[0])):
-    # NEW changed to read all the satlist
-    for i in range(len(inputs['sat_list'])):
-            for j in range(len(Sat[i])):
-                img_path = Sat[i][j]
-                imdata = rasterio.open(img_path)
     
-                # get metadata
-                metadata[inputs['sat_list'][i]]['filenames'].append(img_path)
-                metadata[inputs['sat_list'][i]]['acc_georef'].append(list(imdata.transform)[0:6])
-                metadata[inputs['sat_list'][i]]['epsg'].append(str(imdata.crs).lstrip('EPSG:'))
+        for j in range(len(Sat[i])):
+            img_path = Sat[i][j]
+            imdata = rasterio.open(img_path)
     
-                # date information from file name
-                basename = os.path.basename(img_path)
-                try:
-                    date = datetime.strptime(basename[0:8], '%Y%m%d')
-                    metadata[inputs['sat_list'][i]]['dates'].append(str(date.strftime('%Y-%m-%d')))
-                except Exception as e:
-                    print(f"❌ Date extraction failed for {basename}: {e}")
-                    metadata[inputs['sat_list'][i]]['dates'].append(None)
+            # get metadata
+            metadata[inputs['sat_list'][i]]['filenames'].append(img_path)
+            metadata[inputs['sat_list'][i]]['acc_georef'].append(list(imdata.transform)[0:6])
+            metadata[inputs['sat_list'][i]]['epsg'].append(str(imdata.crs).lstrip('EPSG:'))
     
-                # process print out
-                print(f"{inputs['sat_list'][i]}: {(100*(j+1)/len(Sat[i])):.2f}%", end='\r')
+            # date information from file name
+            basename = os.path.basename(img_path)
+            try:
+                date = datetime.strptime(basename[0:8], '%Y%m%d')
+                metadata[inputs['sat_list'][i]]['dates'].append(str(date.strftime('%Y-%m-%d')))
+            except Exception as e:
+                print(f"❌ Date extraction failed for {basename}: {e}")
+                metadata[inputs['sat_list'][i]]['dates'].append(None)
     
-    with open(os.path.join(filepath, inputs['sitename'] + '_metadata.pkl'), 'wb') as f:
-        pickle.dump(metadata, f)
-        
-    return metadata
+            # process print out
+            print(f"{inputs['sat_list'][i]}: {(100*(j+1)/len(Sat[i])):.2f}%", end='\r')
 
 
 
