@@ -580,6 +580,9 @@ def preprocess_single(ImgColl, georef, fn, datelist, filenames, satname, setting
         # TO DO: add line for cropping input image to Polygon of bounding box/AOI
         # im_cl = mask(img, [BBoxGDF_warp.geometry], crop=True)
         im_ms = img.read()
+
+        # NEW change band ratio 8bands - 4bands
+        im_ms = im_ms[[4, 2, 1, 6], :, :]
         
         # filename should be in the format 'yyyymmdd_HHMMSS_'
         acqtime = datetime.strftime(datetime.strptime(os.path.basename(filenames[fn])[9:15],'%H%M%S'),'%H:%M:%S.%f')
