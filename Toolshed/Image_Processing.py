@@ -20,8 +20,8 @@ from skimage.transform import resize
 from geoarray import GeoArray 
 import rasterio
 
-from shapely.geometry import mapping
-from rasterio.mask import mask
+from shapely.geometry import Polygon, mapping
+from rasterio.mask import mask as rio_mask
 
 from arosics import COREG
 
@@ -582,7 +582,7 @@ def preprocess_single(ImgColl, georef, fn, datelist, filenames, satname, setting
         poly = Polygon(polygon[0])
         img = rasterio.open(filenames[fn])
         geometry = [mapping(poly)]
-        im_cl, im_cl_transform = mask(img, geometry, crop=True)
+        im_cl, im_cl_transform = rio_mask(img, geometry, crop=True)
 
         # NEW reset band ratio
         im_ms = im_cl[[0, 6, 4, 2], :, :]
