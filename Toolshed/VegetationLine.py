@@ -705,7 +705,7 @@ def calculate_features_PS(im_ms, cloud_mask, im_bool):
     features = np.append(features, np.expand_dims(im_std[im_bool],axis=1), axis=-1)
     im_std = Toolbox.image_std(im_BR, 2)
     features = np.append(features, np.expand_dims(im_std[im_bool],axis=1), axis=-1)
-
+    
     return features
 
 
@@ -979,6 +979,10 @@ def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     # reshape labels into vectors (0 is veg, 1 is nonveg)
     vec_water = im_labels[:,:,2].reshape(ncols*nrows)
     vec_nonwater = im_labels[:,:,0].reshape(ncols*nrows)
+    
+    # NEW troubleshotting
+    print("Total water pixels:", np.sum(vec_water))
+    print("Total sand pixels:", np.sum(vec_nonwater))
 
     # use im_ref_buffer and dilate it by 5 pixels
     # TO DO: alternative to expanding buffer; loop expansion until you get longer distance of contour? or acceptable amount of water vs not water?
@@ -989,12 +993,34 @@ def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     # to catch low tide images where ref line prioritises veg, create dummy 'buffer' of all Trues
     vec_buffer = np.full((nrows*ncols), True)
 
+    # NEW troubleshotting
+    print("→ Total buffer pixels:", np.sum(vec_buffer))
+    print("→ Sand ∩ buffer:", np.sum(np.logical_and(vec_buffer, vec_nonwater)))
+    print("→ Water ∩ buffer:", np.sum(np.logical_and(vec_buffer, vec_water)))
+
     # select water/sand pixels that are within the buffer
     int_water = vec_ndi[np.logical_and(vec_buffer,vec_water)]
     int_nonwater = vec_ndi[np.logical_and(vec_buffer,vec_nonwater)]
-    # Empty/low quality images
-    if len(int_water) == 0 or len(int_nonwater) == 0:
+    
+    # NEW - TROUBLESHOTTING
+    if len(int_water) == 0 and len(int_nonwater) == 0:
+        print("No sand or water pixels — skip image.")
         return None, None
+    
+    elif len(int_water) == 0:
+        print("No water pixels in label — using inverse of sand mask as fallback.")
+        vec_water = np.logical_not(vec_nonwater)
+        int_water = vec_ndi[vec_water]
+    
+    elif len(int_nonwater) == 0:
+        print("No sand pixels in label — using inverse of water mask as fallback.")
+        vec_nonwater = np.logical_not(vec_water)
+        int_nonwater = vec_ndi[vec_nonwater]
+
+        
+    # NEW - troubleshotting whether it's because of sand pixels only a few
+    print("Pixels in sand:", np.sum(im_labels[:, :, 0]))
+    print("Pixels in water:", np.sum(im_labels[:, :, 2]))
 
     # make sure both classes have the same number of pixels before thresholding
     if len(int_water) > 0 and len(int_nonwater) > 0:
@@ -1011,8 +1037,29 @@ def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     if len(int_all) == 0:
         print("Warning: int_all is empty or all NaN — skipping image")
         return None, None
+        
+    # NEW - change water threshold
+    # t_ndi = filters.threshold_otsu(int_all)
+    # NEW PATCH:
+    try:
+        t_ndi = filters.threshold_otsu(int_all)
+        print(f"Otsu threshold: {t_ndi:.3f}")
+        if t_ndi < -0.3 or t_ndi > 0.4:
+            print("Otsu threshold is unreasonable for shallow water, using fallback value.")
+            t_ndi = 0.1
+    except Exception as e:
+        print("Otsu failed:", e)
+        t_ndi = 0.1
+        
+    plt.figure()
+    plt.hist(int_all, bins=50)
+    plt.axvline(t_ndi, color='r', label='Threshold')
+    plt.title('NDWI Distribution (Water + Sand)')
+    plt.legend()
+    plt.show()
 
-    t_ndi = filters.threshold_otsu(int_all)
+
+
 
     # find contour with Marching-Squares algorithm
     im_ndi_buffer = np.copy(im_ndi)
