@@ -19,10 +19,6 @@ import skimage.exposure as exposure
 from skimage.transform import resize
 from geoarray import GeoArray 
 import rasterio
-
-from shapely.geometry import Polygon, mapping
-from rasterio.mask import mask as rio_mask
-
 from arosics import COREG
 
 # other modules
@@ -578,15 +574,16 @@ def preprocess_single(ImgColl, georef, fn, datelist, filenames, satname, setting
         if cloud_scoree > settings['cloud_thresh']:
             return None, None, None, None, None, None, None
         
-        # NEW - crop local image
-        poly = Polygon(polygon[0])
+        # read all bands (B,G,R,NIR)        
         img = rasterio.open(filenames[fn])
-        geometry = [mapping(poly)]
-        im_cl, im_cl_transform = rio_mask(img, geometry, crop=True)
+        
+        # TO DO: add line for cropping input image to Polygon of bounding box/AOI
+        # im_cl = mask(img, [BBoxGDF_warp.geometry], crop=True)
+        im_ms = img.read()
 
-        # NEW reset band ratio
-        im_ms = im_cl[[0, 6, 4, 2], :, :]
-                
+        # NEW change band ratio 8bands - 4bands
+        im_ms = im_ms[[1, 3, 5, 7], :, :]
+        
         # filename should be in the format 'yyyymmdd_HHMMSS_'
         acqtime = datetime.strftime(datetime.strptime(os.path.basename(filenames[fn])[9:15],'%H%M%S'),'%H:%M:%S.%f')
         

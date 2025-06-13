@@ -293,11 +293,12 @@ def LocalImageMetadata(inputs, Sat):
                 date = datetime.strptime(basename[0:8], '%Y%m%d')
                 metadata[inputs['sat_list'][i]]['dates'].append(str(date.strftime('%Y-%m-%d')))
             except Exception as e:
-                print(f"❌ Date extraction failed for {basename}: {e}")
+                print(f"Date extraction failed for {basename}: {e}")
                 metadata[inputs['sat_list'][i]]['dates'].append(None)
     
-            # process print out
-            print(f"{inputs['sat_list'][i]}: {(100*(j+1)/len(Sat[i])):.2f}%", end='\r')
+        # NEW process print out
+        print(f"{inputs['sat_list'][i]}: {(100*(j+1)/len(Sat[i])):.2f}%", end='\r')
+        return metadata
 
 
 
