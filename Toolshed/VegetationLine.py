@@ -199,8 +199,8 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                 elif satname == 'S2':
                     sh_clf = joblib.load(os.path.join(filepath_models, 'NN_4classes_S2_new.pkl'))
                     PS = False
-                else: # Planet or local image with no SWIR
-                    sh_clf = joblib.load(os.path.join(filepath_models, 'NN_4classes_PS_NARRA_new.pkl'))
+                else: # Planet or local image with no SWIR - NEW CHANGE TO TRAINED ONE
+                    sh_clf = joblib.load(os.path.join(filepath_models, 'NN_4classes_PS_lines.pkl'))
                     PS = True
                 sh_classif, sh_labels = classify_image_NN_shore(im_ms, im_extra, cloud_mask, min_beach_area_pixels, sh_clf, PS)
             
@@ -218,19 +218,37 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
             im_ndvi = Toolbox.nd_index(im_ms[:,:,3], im_ms[:,:,2], cloud_mask)
 
             # contours_ndvi, t_ndvi = FindShoreContours_Enhc(im_ndvi, im_labels, cloud_mask, im_ref_buffer)
-            contours_ndvi, t_ndvi = FindShoreContours_WP(im_ndvi, im_labels, cloud_mask, im_ref_buffer)
+            contours_ndvi, t_ndvi, int_veg, int_nonveg = FindShoreContours_WP(im_ndvi, im_labels, cloud_mask, im_ref_buffer)
+            
             if contours_ndvi is None:
                 skipped['no_contours'].append([filenames[fn], satname, acqdate+' '+acqtime])
                 print(' - Poor image quality: no contours generated.')
                 continue
+            # NEW - SAVE NDVI HISTOGRAM
+            Image_Processing.save_NDVI_histogram(
+            int_veg=int_veg,
+            int_nonveg=int_nonveg,
+            t_ndvi=t_ndvi,
+            date=acqdate,
+            satname=satname,
+            settings=settings)
             
             if settings['wetdry'] == True:
                 im_ndwi = Toolbox.nd_index(im_ms[:,:,3], im_ms[:,:,1], cloud_mask)
-                contours_ndwi, t_ndwi = FindShoreContours_Water(im_ndwi, sh_labels, cloud_mask, im_ref_buffer)
+                contours_ndwi, t_ndwi, int_water, int_nonwater = FindShoreContours_Water(im_ndwi, sh_labels, cloud_mask, im_ref_buffer)
                 if contours_ndwi is None:
                     skipped['no_contours'].append([filenames[fn], satname, acqdate+' '+acqtime])
                     print(' - Poor image quality: no water contours generated.')
                     continue
+                    
+            Image_Processing.save_NDWI_histogram(
+            int_water=int_water,
+            int_nonwater=int_nonwater,
+            t_ndi=t_ndwi,
+            date=acqdate,
+            satname=satname,
+            settings=settings
+        )
                 
             # process the contours into a vegline
             vegline, vegline_latlon, vegline_proj = ProcessShoreline(contours_ndvi, cloud_mask, georef, image_epsg, settings)
@@ -945,132 +963,92 @@ def FindShoreContours_Enhc(im_ndi, im_labels, cloud_mask, im_ref_buffer):
 
     # return contours and threshold value
     return contours_ndi, t_ndi
+    
 
 def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     """
     New robust method for extracting wet-dry boundaries. Incorporates the NN classification
     component to refine the Otsu threshold and make it specific to the inter-class interface.
-    FM Oct 2022, adapted from KV WRL 2018
-    Arguments:
-    -----------
-    im_ms: np.array
-        RGB + downsampled NIR and SWIR
-    im_labels: np.array
-        3D image containing a boolean image for each class in the order (sand, swash, water)
-    cloud_mask: np.array
-        2D cloud mask with True where cloud pixels are
-    im_ref_buffer: np.array
-        binary image containing a buffer around the reference shoreline
-    Returns:    
-    -----------
-    contours_mwi: list of np.arrays
-        contains the coordinates of the contour lines extracted from the
-        MNDWI (Modified Normalized Difference Water Index) image
-    t_mwi: float
-        Otsu sand/water threshold used to map the contours
     """
 
     nrows = cloud_mask.shape[0]
     ncols = cloud_mask.shape[1]
-    
-    # reshape spectral index image to vector
-    vec_ndi = im_ndi.reshape(nrows*ncols)
 
-    # reshape labels into vectors (0 is veg, 1 is nonveg)
-    vec_water = im_labels[:,:,2].reshape(ncols*nrows)
-    vec_nonwater = im_labels[:,:,0].reshape(ncols*nrows)
-    
-    # NEW troubleshotting
+    # reshape spectral index image to vector
+    vec_ndi = im_ndi.reshape(nrows * ncols)
+
+    vec_water = im_labels[:, :, 2].reshape(nrows * ncols)
+    vec_nonwater = im_labels[:, :, 0].reshape(nrows * ncols)
+
     print("Total water pixels:", np.sum(vec_water))
     print("Total sand pixels:", np.sum(vec_nonwater))
 
-    # use im_ref_buffer and dilate it by 5 pixels
-    # TO DO: alternative to expanding buffer; loop expansion until you get longer distance of contour? or acceptable amount of water vs not water?
+    # Buffer: dilate reference buffer and use it
     se = morphology.disk(5)
     im_ref_buffer_extra = morphology.binary_dilation(im_ref_buffer, se)
-    # create a buffer around the sandy beach
-    # vec_buffer = im_ref_buffer_extra.reshape(nrows*ncols)
-    # to catch low tide images where ref line prioritises veg, create dummy 'buffer' of all Trues
-    vec_buffer = np.full((nrows*ncols), True)
+    vec_buffer = im_ref_buffer_extra.reshape(nrows * ncols)
 
-    # NEW troubleshotting
-    print("→ Total buffer pixels:", np.sum(vec_buffer))
-    print("→ Sand ∩ buffer:", np.sum(np.logical_and(vec_buffer, vec_nonwater)))
-    print("→ Water ∩ buffer:", np.sum(np.logical_and(vec_buffer, vec_water)))
+    # Select water/sand pixels within buffer
+    int_water = vec_ndi[np.logical_and(vec_buffer, vec_water)]
+    int_nonwater = vec_ndi[np.logical_and(vec_buffer, vec_nonwater)]
 
-    # select water/sand pixels that are within the buffer
-    int_water = vec_ndi[np.logical_and(vec_buffer,vec_water)]
-    int_nonwater = vec_ndi[np.logical_and(vec_buffer,vec_nonwater)]
-    
-    # NEW - TROUBLESHOTTING
+    # Handle empty cases
     if len(int_water) == 0 and len(int_nonwater) == 0:
         print("No sand or water pixels — skip image.")
-        return None, None
-    
+        return None, None, None, None
+
     elif len(int_water) == 0:
-        print("No water pixels in label — using inverse of sand mask as fallback.")
+        print("No water pixels — using inverse of sand mask.")
         vec_water = np.logical_not(vec_nonwater)
-        int_water = vec_ndi[vec_water]
-    
+        int_water = vec_ndi[np.logical_and(vec_buffer, vec_water)]
+
     elif len(int_nonwater) == 0:
-        print("No sand pixels in label — using inverse of water mask as fallback.")
+        print("No sand pixels — using inverse of water mask.")
         vec_nonwater = np.logical_not(vec_water)
-        int_nonwater = vec_ndi[vec_nonwater]
+        int_nonwater = vec_ndi[np.logical_and(vec_buffer, vec_nonwater)]
 
-        
-    # NEW - troubleshotting whether it's because of sand pixels only a few
-    print("Pixels in sand:", np.sum(im_labels[:, :, 0]))
-    print("Pixels in water:", np.sum(im_labels[:, :, 2]))
-
-    # make sure both classes have the same number of pixels before thresholding
+    # Equalize class sizes
     if len(int_water) > 0 and len(int_nonwater) > 0:
-        if np.argmin([int_water.shape[0],int_nonwater.shape[0]]) == 1:
-            int_water = int_water[np.random.choice(int_water.shape[0],int_nonwater.shape[0], replace=False)]
+        if len(int_water) < len(int_nonwater):
+            int_nonwater = np.random.choice(int_nonwater, size=len(int_water), replace=False)
         else:
-            int_nonwater = int_nonwater[np.random.choice(int_nonwater.shape[0],int_water.shape[0], replace=False)]
+            int_water = np.random.choice(int_water, size=len(int_nonwater), replace=False)
 
-    # threshold the sand/water intensities
-    int_all = np.append(int_water,int_nonwater, axis=0)
-    
-    # NEW: remove NaNs before thresholding
+    # Combine all
+    int_all = np.append(int_water, int_nonwater)
     int_all = int_all[~np.isnan(int_all)]
+
     if len(int_all) == 0:
-        print("Warning: int_all is empty or all NaN — skipping image")
-        return None, None
-        
-    # NEW - change water threshold
-    # t_ndi = filters.threshold_otsu(int_all)
-    # NEW PATCH:
-    try:
-        t_ndi = filters.threshold_otsu(int_all)
-        print(f"Otsu threshold: {t_ndi:.3f}")
-        if t_ndi < -0.3 or t_ndi > 0.4:
-            print("Otsu threshold is unreasonable for shallow water, using fallback value.")
-            t_ndi = 0.1
-    except Exception as e:
-        print("Otsu failed:", e)
+        print("All intensities are NaN — skipping image")
+        return None, None, None, None
+
+    # Clip NDWI thresholding range
+    min_ndwi = -0.8
+    max_ndwi = 0.1
+    valid_range = (int_all >= min_ndwi) & (int_all <= max_ndwi)
+    int_all_clipped = int_all[valid_range]
+
+    if len(int_all_clipped) == 0:
+        print("No NDWI pixels in clipping range — using fallback threshold 0.1")
         t_ndi = 0.1
-        
-    plt.figure()
-    plt.hist(int_all, bins=50)
-    plt.axvline(t_ndi, color='r', label='Threshold')
-    plt.title('NDWI Distribution (Water + Sand)')
-    plt.legend()
-    plt.show()
+    else:
+        # Compute Otsu
+        t_ndi = filters.threshold_otsu(int_all_clipped)
+        print(f"Otsu threshold: {t_ndi:.3f}")
 
+        # Sanity check
+        if t_ndi < min_ndwi or t_ndi > max_ndwi:
+            print(f"Otsu threshold {t_ndi:.3f} out of range — using fallback 0.1")
+            t_ndi = 0.1
 
-
-
-    # find contour with Marching-Squares algorithm
+    # Contour detection — **mask everything outside the buffer**
     im_ndi_buffer = np.copy(im_ndi)
-    # im_ndi_buffer[~im_ref_buffer] = np.nan
+    im_ndi_buffer[~im_ref_buffer_extra] = np.nan
+
     contours_ndi = measure.find_contours(im_ndi_buffer, t_ndi)
-    # remove contour points that are NaNs (around clouds)
     contours_ndi = process_contours(contours_ndi)
 
-    # only return MNDWI contours and threshold
-    return contours_ndi, t_ndi
-
+    return contours_ndi, t_ndi, int_water, int_nonwater
 
 
 def FindShoreContours_WP(im_ndi, im_labels, cloud_mask, im_ref_buffer):
@@ -1101,20 +1079,46 @@ def FindShoreContours_WP(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     
     # clip down classified band index values to coastal buffer
     int_veg, int_nonveg = Image_Processing.ClipIndexVec(cloud_mask, im_ndi, im_labels, im_ref_buffer)
+    
     # Empty/low quality images
     if int_veg is None or int_nonveg is None:
-        return None, None
+        return None, None, None, None
     
-    t_ndi, _ = Toolbox.FindWPThresh(int_veg, int_nonveg)
-    # find contour with Marching-Squares algorithm
+    # Combine all intensities
+    int_all = np.append(int_veg, int_nonveg)
+    
+    # Remove NaNs
+    int_all = int_all[~np.isnan(int_all)]
+    
+    # NEW ADDING THRESHOLD - Clip NDVI range before thresholding
+    min_ndvi = 0.1
+    max_ndvi = 0.6
+    valid_range = (int_all >= min_ndvi) & (int_all <= max_ndvi)
+    int_all_clipped = int_all[valid_range]
+    
+    # Check if any pixels remain
+    if len(int_all_clipped) == 0:
+        print("Warning: no NDVI pixels in clipping range — using fallback threshold 0.25")
+        t_ndi = 0.25
+    else:
+        t_ndi = filters.threshold_otsu(int_all_clipped)
+    
+    # Sanity check
+    if t_ndi < min_ndvi or t_ndi > max_ndvi:
+        print(f"NDVI threshold {t_ndi:.3f} out of expected range after clipping — using fallback 0.25")
+        t_ndi = 0.25
+        
+    # Find contour with Marching-Squares
     im_ndi_buffer = np.copy(im_ndi)
     im_ndi_buffer[~im_ref_buffer] = np.nan
     contours_ndi = measure.find_contours(im_ndi_buffer, t_ndi)
-    # remove contour points that are NaNs (around clouds)
+    
+    # Clean contours
     contours_ndi = process_contours(contours_ndi)
+    
+    # Return everything
+    return contours_ndi, t_ndi, int_veg, int_nonveg
 
-    # only return contours and threshold
-    return contours_ndi, t_ndi
 
 
 def find_wl_contours1_old(im_ndvi, cloud_mask, im_ref_buffer, satname):
