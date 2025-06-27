@@ -1929,7 +1929,7 @@ def AOIfromLine(referenceLinePath, max_dist_ref, sitename):
                             columns=['Area'], fill_color='YlGn',
                             fill_opacity=0.5).add_to(m)
     folium.Marker(location=[BBoxGDF.centroid.x,BBoxGDF.centroid.y],
-                  popup=str(round(float(BBoxGDF.to_crs('epsg:32630').area)))+' sq m'
+                  popup=str(round(float(BBoxGDF.to_crs('epsg:4326').area)))+' sq m'
                   ).add_to(m)
     m.save("./Data/"+sitename+"/AOImap.html")
     
