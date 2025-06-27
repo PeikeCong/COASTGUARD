@@ -1104,6 +1104,132 @@ def QAMask(im_ms, satname, cloud_thresh):
     
     return im_ms
 
+# NEW -- save process ndwi and ndvi
+def save_NDWI_histogram(
+    int_water,
+    int_nonwater,
+    t_ndi,
+    date,
+    satname,
+    settings
+):
+    """
+    Saves a histogram plot of NDWI pixel values inside buffer area.
+
+    Parameters
+    ----------
+    int_water : np.array
+        NDWI values of pixels classified as water.
+    int_nonwater : np.array
+        NDWI values of pixels classified as sand.
+    t_ndi : float
+        Otsu threshold separating classes.
+    date : str
+        Date string of the image.
+    satname : str
+        Satellite name.
+    settings : dict
+        Settings dictionary containing 'inputs' and 'save_figure'.
+    """
+
+    # Only save if settings say so
+    if not settings.get('save_figure', False):
+        return
+
+    # Build save folder path (same as show_detection)
+    filepath = os.path.join(
+        settings['inputs']['filepath'],
+        settings['inputs']['sitename'],
+        'img_files',
+        'detection'
+    )
+    os.makedirs(filepath, exist_ok=True)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bins = np.linspace(-1, 1, 50)
+
+    ax.hist(int_nonwater, bins=bins, alpha=0.6, label='Sand pixels', color='tan', edgecolor='k')
+    ax.hist(int_water, bins=bins, alpha=0.6, label='Water pixels', color='skyblue', edgecolor='k')
+    ax.axvline(t_ndi, color='red', linestyle='--', linewidth=2, label=f'Threshold = {t_ndi:.3f}')
+
+    ax.set_title("NDWI Distribution within Buffer Area")
+    ax.set_xlabel("NDWI value")
+    ax.set_ylabel("Pixel count")
+    ax.legend()
+    fig.tight_layout()
+
+    # Save
+    filename = f"{date}_{satname}_ndwi_histogram.jpg"
+    save_path = os.path.join(filepath, filename)
+    fig.savefig(save_path, dpi=150)
+    print("Saved NDWI histogram to:", save_path)
+
+    plt.close(fig)
+
+
+def save_NDVI_histogram(
+    int_veg,
+    int_nonveg,
+    t_ndvi,
+    date,
+    satname,
+    settings
+):
+    """
+    Saves a histogram plot of NDVI pixel values inside buffer area.
+
+    Parameters
+    ----------
+    int_veg : np.array
+        NDVI values of pixels classified as vegetation.
+    int_nonveg : np.array
+        NDVI values of pixels classified as non-vegetation.
+    t_ndvi : float
+        Otsu threshold separating classes.
+    date : str
+        Date string of the image.
+    satname : str
+        Satellite name.
+    settings : dict
+        Settings dictionary containing 'inputs' and 'save_figure'.
+    """
+
+    # Only save if settings say so
+    if not settings.get('save_figure', False):
+        return
+
+    # Build save folder path (same as show_detection)
+    filepath = os.path.join(
+        settings['inputs']['filepath'],
+        settings['inputs']['sitename'],
+        'img_files',
+        'detection'
+    )
+    os.makedirs(filepath, exist_ok=True)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bins = np.linspace(-1, 1, 50)
+
+    ax.hist(int_nonveg, bins=bins, alpha=0.6, label='Non-vegetation pixels', color='sandybrown', edgecolor='k')
+    ax.hist(int_veg, bins=bins, alpha=0.6, label='Vegetation pixels', color='forestgreen', edgecolor='k')
+    ax.axvline(t_ndvi, color='red', linestyle='--', linewidth=2, label=f'Threshold = {t_ndvi:.3f}')
+
+    ax.set_title("NDVI Distribution within Buffer Area")
+    ax.set_xlabel("NDVI value")
+    ax.set_ylabel("Pixel count")
+    ax.legend()
+    fig.tight_layout()
+
+    # Save
+    filename = f"{date}_{satname}_ndvi_histogram.jpg"
+    save_path = os.path.join(filepath, filename)
+    fig.savefig(save_path, dpi=150)
+    print("Saved NDVI histogram to:", save_path)
+
+    plt.close(fig)
+
 
 ###################################################################################################
 # AUXILIARY COASTSAT FUNCTIONS
