@@ -2459,6 +2459,40 @@ def CalcDistance(Geom1,Geom2):
         
     return geom1geom2dist
 
+# NEW LOCAL TIDES
+def ComputeTideLocal(settings, tidepath, tideoutpath, daterange, tidelatlon):
+    """
+    Load local tide data CSV and export filtered tide levels.
+    """
+    import pandas as pd
+    import os
+
+    if os.path.isfile(tideoutpath):
+        print('Tide data already compiled.')
+        return
+
+    # Fixed path to your local tide data
+    local_csv = os.path.join("tide_data", "sj_tide_utc.csv")
+    df = pd.read_csv(local_csv)
+    df["dates"] = pd.to_datetime(df["dates"])
+
+    # Convert to timezone-aware (UTC)
+    df["dates"] = df["dates"].dt.tz_convert("UTC")
+
+    # Filter by date range (+/-1 day buffer), localize bounds to UTC
+    startdate = pd.to_datetime(daterange[0]).tz_localize("UTC") - pd.Timedelta(days=1)
+    enddate = pd.to_datetime(daterange[1]).tz_localize("UTC") + pd.Timedelta(days=1)
+    df_filtered = df[(df["dates"] >= startdate) & (df["dates"] <= enddate)]
+
+    # Rename columns to match expected output
+    df_filtered = df_filtered.rename(columns={"dates": "date"})
+
+    # Save output
+    df_filtered.to_csv(tideoutpath, index=False)
+    print(f"Tide data saved to {tideoutpath}")
+
+    return
+
 
 def ComputeTides(settings,tidepath,tideoutpath,daterange,tidelatlon):
     """

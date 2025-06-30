@@ -19,7 +19,6 @@ from Toolshed import Toolbox, Download
 
 
 
-
 def GetHindcastWaveData(settings, output, lonmin, lonmax, latmin, latmax):
     """
     Download command for CMEMS wave hindcast data. User supplies date range, AOI, username and password.
