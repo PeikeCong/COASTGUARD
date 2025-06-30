@@ -391,7 +391,8 @@ def CMSDownload(CMScmd):
     """
     
     # Log in to Copernicus Marine Service data store using your provided username and password
-    cms.login(skip_if_user_logged_in=True)
+    cms.login(username="pk376328@dal.ca", password="123456cpK")
+
     
     # If requesting a forecast, use 'Global Ocean Waves Analysis and Forecast' data from Copernicus
     if CMScmd['hind_fore'] == 'fore':
@@ -453,7 +454,7 @@ def CMSDownload(CMScmd):
                 )
             
             # Combine multiyear and interim data into one dataset
-            CombiData = xr.open_mfdataset([MYrWavePath,IntWavePath],combine='nested', concat_dim='time')
+            CombiData = xr.open_mfdataset([str(MYrWavePath),IntWavePath],combine='nested', concat_dim='time', engine='netcdf4')
             # Save combined dataset to new netCDF file under desired name
             CombiData.to_netcdf(os.path.join(CMScmd['WavePath'],CMScmd['WaveOutFile']))
             # Clean up folder by deleting multiyear and interim files
@@ -531,7 +532,9 @@ def CMSDownload(CMScmd):
                 )
             
             # Combine multiyear and interim data into one dataset
-            CombiData = xr.open_mfdataset([MYrWavePath,IntWavePath],combine='nested', concat_dim='time')
+            print("DEBUG MyWavePath:", MyWavePath)
+            print("Type:", type(MyWavePath))
+            CombiData = xr.open_mfdataset([str(MYrWavePath),IntWavePath],combine='nested', concat_dim='time', engine='netcdf4')
             # Save combined dataset to new netCDF file under desired name
             CombiData.to_netcdf(os.path.join(CMScmd['WavePath'],CMScmd['WaveOutFile']))
             # Clean up folder by deleting multiyear and interim files
