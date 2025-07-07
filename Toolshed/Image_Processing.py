@@ -31,7 +31,7 @@ from shapely import geometry
 import ee
 import geemap
 import glob
-from datetime import datetime
+from datetime import datetime, timezone
 
 # CoastSat modules
 from Toolshed import Toolbox
@@ -1229,6 +1229,105 @@ def save_NDVI_histogram(
     print("Saved NDVI histogram to:", save_path)
 
     plt.close(fig)
+
+
+def save_tide_plot(
+    filename,
+    satname,
+    settings
+):
+    """
+    Save daily tide plot with highlight at the time extracted from filename.
+
+    Parameters
+    ----------
+    filename : str
+        Name of the satellite image file.
+    satname : str
+        Satellite name.
+    settings : dict
+        Settings dictionary containing 'inputs' and 'save_figure'.
+    """
+
+    if not settings.get('save_figure', False):
+        return
+
+    # --- Extract date and time ---
+    parts = filename.split("_")
+    date_str = parts[0]        # '20230122'
+    time_str = parts[1]        # '145737'
+    dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
+    dt_utc = dt.replace(tzinfo=timezone.utc)
+
+    # --- Read tide data ---
+    local_csv = os.path.join("tide_data", "tide_data_utc.csv")
+    df = pd.read_csv(local_csv)
+    df["date"] = pd.to_datetime(df["date"])
+
+    # --- Filter for the day ---
+    date_only = dt_utc.date()
+    day_df = df[df["date"].dt.date == date_only]
+
+    if day_df.empty:
+        print(f"No tide data for {date_only}.")
+        return
+
+    # --- Find closest tide record ---
+    closest_idx = (day_df["date"] - dt_utc).abs().idxmin()
+    closest_row = day_df.loc[closest_idx]
+    closest_time = closest_row["date"]
+    closest_height = closest_row["tide"]
+
+    # --- Prepare save folder path ---
+    filepath = os.path.join(
+        settings['inputs']['filepath'],
+        settings['inputs']['sitename'],
+        'img_files',
+        'detection'
+    )
+    os.makedirs(filepath, exist_ok=True)
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.plot(
+        day_df["date"],
+        day_df["tide"],
+        label="Tide Height",
+        color="blue"
+    )
+
+    ax.scatter(
+        [closest_time],
+        [closest_height],
+        color="red",
+        zorder=5,
+        label=f"Selected Time {dt_utc.strftime('%H:%M:%S')}"
+    )
+
+    ax.text(
+        closest_time,
+        closest_height + 0.05,
+        f"{closest_height:.2f} m",
+        color="red",
+        ha="center"
+    )
+
+    ax.set_title(f"Tide Data on {date_only} at {dt_utc.strftime('%H:%M:%S UTC')}")
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("Tide Height (m)")
+    ax.legend()
+    ax.grid(True)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    # --- Save file ---
+    out_filename = f"{date_only.strftime('%Y-%m-%d')}_{satname}_tide_plot.jpg"
+    save_path = os.path.join(filepath, out_filename)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    
+    print("Saved tide plot to:", save_path)
 
 
 ###################################################################################################

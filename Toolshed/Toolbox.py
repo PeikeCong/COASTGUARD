@@ -2464,33 +2464,16 @@ def ComputeTideLocal(settings, tidepath, tideoutpath, daterange, tidelatlon):
     """
     Load local tide data CSV and export filtered tide levels.
     """
-    import pandas as pd
-    import os
-
     if os.path.isfile(tideoutpath):
         print('Tide data already compiled.')
         return
-
     # Fixed path to your local tide data
-    local_csv = os.path.join("tide_data", "sj_tide_utc.csv")
+    local_csv = os.path.join("tide_data", "tide_data_utc.csv")
     df = pd.read_csv(local_csv)
-    df["dates"] = pd.to_datetime(df["dates"])
-
-    # Convert to timezone-aware (UTC)
-    df["dates"] = df["dates"].dt.tz_convert("UTC")
-
-    # Filter by date range (+/-1 day buffer), localize bounds to UTC
-    startdate = pd.to_datetime(daterange[0]).tz_localize("UTC") - pd.Timedelta(days=1)
-    enddate = pd.to_datetime(daterange[1]).tz_localize("UTC") + pd.Timedelta(days=1)
-    df_filtered = df[(df["dates"] >= startdate) & (df["dates"] <= enddate)]
-
-    # Rename columns to match expected output
-    df_filtered = df_filtered.rename(columns={"dates": "date"})
-
+    df["date"] = pd.to_datetime(df["date"])
     # Save output
-    df_filtered.to_csv(tideoutpath, index=False)
+    df.to_csv(tideoutpath, index=False)
     print(f"Tide data saved to {tideoutpath}")
-
     return
 
 
@@ -2627,74 +2610,58 @@ def ChangeYAMLPaths(configfile, tidepath):
     with open(configfile, 'w') as file:
         file.write(filedata)
 
-
+# NEW - change to local tide csv 
 def GetWaterElevs(settings, Dates_Sat, Daily=False):
-    '''
-    Extracts matching water elevations from formatted CSV of tide heights and times.
-    FM Jun 2023
+    """
+    Extracts matching water elevations from a local CSV of tide heights and times.
 
     Parameters
     ----------
     settings : dict
-        Dictionary of user-defined settings used for the veg edge/waterline extraction.
-    Dates_Sat : list
-        List of dates and times of images used to extract veg/water lines from.
+        Dictionary of user-defined settings.
+    Dates_Sat : list of datetime
+        Timestamps of the images.
+    Daily : bool
+        If True, also return daily mean and max.
 
     Returns
     -------
     tides_sat : list
-        List of tidal elevations at time of image capture (with n = n(dates_sat)).
+        Tidal elevations at time of image capture.
+    """
+    import pandas as pd
+    import numpy as np
+    import os
 
-    '''
-
-    # load tidal data
-    # TideFilepath = os.path.join(settings['inputs']['filepath'],'tides',settings['inputs']['sitename']+'_tides.csv')
-    TideFilepath = os.path.join(settings['inputs']['filepath'],
-                                'tides',settings['inputs']['sitename']+'_tides_'+
-                                settings['inputs']['dates'][0]+'_'+settings['inputs']['dates'][1]+'.csv')
+    # Load tidal data from fixed local file
+    TideFilepath = os.path.join("tide_data", "tide_data_utc.csv")
     Tide_Data = pd.read_csv(TideFilepath, parse_dates=['date'])
-    Dates_ts = [_.to_pydatetime() for _ in Tide_Data['date']]
-    Tides_ts = np.array(Tide_Data['tide'])
+    Tide_Data['date'] = Tide_Data['date'].dt.tz_localize('UTC')
+    Tide_Data.set_index('date', inplace=True)
 
-    # Calculate time step used for interpolating data between
-    TimeStep = (Dates_ts[1]-Dates_ts[0]).total_seconds()/(60*60)
-    
     Tides_Sat = []
-    
-    # Previously found first following tide time, but incorrect when time is e.g. only 1min past the hour
-    # for i,date in enumerate(dates_sat):
-    #     tides_sat.append(tides_ts[find(min(item for item in dates_ts if item > date), dates_ts)])
-    
-    # Interpolate tide using number of minutes through the hour the satellite image was captured
-    for i,date in enumerate(Dates_Sat):
-        # find preceding and following hourly tide levels and times
-        # Time_1 = Dates_ts[find(min(item for item in Dates_ts if item > date-timedelta(hours=TimeStep)), Dates_ts)]
-        Tide_1 = Tides_ts[find(min(item for item in Dates_ts if item > date-timedelta(hours=TimeStep)), Dates_ts)]
-        Time_2 = Dates_ts[find(min(item for item in Dates_ts if item > date), Dates_ts)]
-        Tide_2 = Tides_ts[find(min(item for item in Dates_ts if item > date), Dates_ts)]
-        
-        # Find time difference of actual satellite timestamp (next hour minus sat timestamp)
-        TimeDiff = Time_2 - date
-        # Get proportion of time through the hour (e.g. 59mins past = 0.01)
-        TimeProp = TimeDiff / timedelta(hours=TimeStep)
-        
-        # Get difference between the two tidal stages
-        TideDiff = (Tide_2 - Tide_1)
-        Tide_Sat = Tide_2 - (TideDiff * TimeProp)
-        
-        Tides_Sat.append(Tide_Sat)
-    
-    # if no daily tide data needed, just return interpolated list of tide elevs
-    if Daily==False:
+
+    # For each satellite timestamp, find the closest tide record
+    for ts in Dates_Sat:
+        try:
+            idx = (np.abs(Tide_Data.index - ts)).argmin()
+            tide = Tide_Data.iloc[idx]['tide']
+        except Exception as e:
+            print(f"Error finding tide for {ts}: {e}")
+            tide = np.nan
+
+        Tides_Sat.append(tide)
+
+    if not Daily:
         return Tides_Sat
     else:
-        # Otherwise, calculate daily mean and max of tide elevs for whole timeseries
-        Tide_Data.index = Tide_Data['date']
-        Tides_DailyMean = Tide_Data.resample('D')['tide'].mean()
-        Tides_DailyMax = Tide_Data.resample('D')['tide'].max()
+        Tides_DailyMean = Tide_Data['tide'].resample('D').mean()
+        Tides_DailyMax = Tide_Data['tide'].resample('D').max()
         return Tides_Sat, Tides_DailyMean, Tides_DailyMax
 
 
+
+# NEW - fixed threshold
 def BeachTideLoc(settings, TideSeries=None):
     '''
     Create steps of water elevation based on a tidal range, which correspond to the 'lower', 'middle' and 'upper' beach.
@@ -2713,20 +2680,7 @@ def BeachTideLoc(settings, TideSeries=None):
 
     '''
     
-    if TideSeries is None:
-        tidefilepath = os.path.join(settings['inputs']['filepath'],'tides',settings['inputs']['sitename']+
-                                    '_tides_'+settings['inputs']['dates'][0]+'_'+settings['inputs']['dates'][1]+'.csv')
-        tide_data = pd.read_csv(tidefilepath, parse_dates=['date'])
-        tides_ts = np.array(tide_data['tide'])
-    else:
-        tides_ts = TideSeries
-    
-    MaxTide = np.max(tides_ts)
-    MinTide = np.min(tides_ts)
-    TideStep = (MaxTide - MinTide)/3
-    
-    TideSteps = [MinTide, MinTide+TideStep, MaxTide-TideStep, MaxTide]
-    
+    TideSteps = [0.0, 3.1, 5.3]
     return TideSteps
 
 

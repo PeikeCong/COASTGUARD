@@ -5,6 +5,7 @@ Freya Muir, University of Glasgow
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # image processing modules
 import ee
@@ -99,6 +100,26 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
         #filepath = Toolbox.get_filepath(settings['inputs'],satname)
         filenames = metadata[satname]['filenames']
         datelist = metadata[satname]['dates']
+
+        # NEW - Build list of datetimes for tide lookup
+        dates_sat = []
+        for i in range(len(filenames)):
+            dt = pd.to_datetime(datelist[i]).tz_localize('UTC')
+            dates_sat.append(dt)
+            # If you have acquisition times separately, adjust accordingly:
+            # dates_sat.append(pd.to_datetime(datelist[i] + " " + acquisition_times[i]))
+            
+        # NEW - Load tide elevations and tide classes
+        print("Loading tide elevations for all images...")
+        try:
+            output_waterelev = Toolbox.GetWaterElevs(settings, dates_sat)
+        except Exception as e:
+            print(f"Could not load tide data: {e}")
+            output_waterelev = [np.nan] * len(dates_sat)
+            
+        TideSteps = Toolbox.BeachTideLoc(settings)
+        output_tidetype = []
+
         # Collate filenames of images per platform
         imgs = []
         for i in range(len(filenames)):
@@ -130,7 +151,7 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
         buffer_size_pixels = np.ceil(settings['buffer_size']/pixel_size)
         min_beach_area_pixels = np.ceil(settings['min_beach_area']/pixel_size**2)
 
-
+        output_tidelevel = []
         # loop through the images
         for fn in range(len(filenames)):
             
@@ -232,15 +253,43 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
             date=acqdate,
             satname=satname,
             settings=settings)
+
             
             if settings['wetdry'] == True:
                 im_ndwi = Toolbox.nd_index(im_ms[:,:,3], im_ms[:,:,1], cloud_mask)
-                contours_ndwi, t_ndwi, int_water, int_nonwater = FindShoreContours_Water(im_ndwi, sh_labels, cloud_mask, im_ref_buffer)
+                
+                # NEW - Retrieve precomputed tide for this image
+                tide = output_waterelev[fn]
+                output_tidelevel.append(tide)
+                
+                # Classify tide into label
+                if tide is None or np.isnan(tide):
+                    tidetype = "unknown"
+                elif tide <= TideSteps[1]:
+                    tidetype = "low"
+                elif tide <= TideSteps[2]:
+                    tidetype = "middle"
+                else:
+                    tidetype = "high"
+                output_tidetype.append(tidetype)
+                
+                # Choose contouring method based on tide label
+                if tidetype == "high":
+                    contours_ndwi, t_ndwi, int_water, int_nonwater = FindShoreContours_Water_HT(
+                        im_ndwi, sh_labels, cloud_mask, im_ref_buffer
+                    )
+                else:
+                    contours_ndwi, t_ndwi, int_water, int_nonwater = FindShoreContours_Water_LT(
+                        im_ndwi, sh_labels, cloud_mask, im_ref_buffer
+                    )
+
+                
+                # --- Check if no contours ---
                 if contours_ndwi is None:
                     skipped['no_contours'].append([filenames[fn], satname, acqdate+' '+acqtime])
                     print(' - Poor image quality: no water contours generated.')
                     continue
-                    
+
             Image_Processing.save_NDWI_histogram(
             int_water=int_water,
             int_nonwater=int_nonwater,
@@ -249,6 +298,14 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
             satname=satname,
             settings=settings
         )
+            
+            # NEW - SAVE TIDE PLOT
+            Image_Processing.save_tide_plot(
+                filename=os.path.basename(filenames[fn]),
+                satname=satname,
+                settings=settings
+            )
+
                 
             # process the contours into a vegline
             vegline, vegline_latlon, vegline_proj = ProcessShoreline(contours_ndvi, cloud_mask, georef, image_epsg, settings)
@@ -323,7 +380,10 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                 'cloud_cover': output_cloudcover,
                 'idx': output_idxkeep,
                 'vthreshold': output_t_ndvi,
-                'wthreshold': output_t_ndwi
+                'wthreshold': output_t_ndwi,
+                'tideelev': output_tidelevel,
+                'tidetype': output_tidetype
+
                 }
     
         output_latlon[satname] = {
@@ -335,7 +395,9 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                 'cloud_cover': output_cloudcover,
                 'idx': output_idxkeep,
                 'vthreshold': output_t_ndvi,
-                'wthreshold': output_t_ndwi
+                'wthreshold': output_t_ndwi,
+                'tideelev': output_tidelevel,
+                'tidetype': output_tidetype
                 }
         
         output_proj[satname] = {
@@ -347,28 +409,11 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                 'cloud_cover': output_cloudcover,
                 'idx': output_idxkeep,
                 'vthreshold': output_t_ndvi,
-                'wthreshold': output_t_ndwi
+                'wthreshold': output_t_ndwi,
+                'tideelev': output_tidelevel,
+                'tidetype': output_tidetype
                 }
-        
 
-        dates_sat = []
-        for i in range(len(output_date)):
-            dates_sat_str = output_date[i] +' '+output_time[i]
-            dates_sat.append(datetime.strptime(dates_sat_str, '%Y-%m-%d %H:%M:%S.%f'))
-        
-        # Water elevations for each image are grabbed from FES2014 to be able to 
-        # filter veg lines by tidal stage (e.g. disregard low tide veg edges)
-        if os.path.isfile(os.path.join(settings['inputs']['filepath'],'tides',
-                                       settings['inputs']['sitename']+'_tides_'+
-                                       settings['inputs']['dates'][0]+'_'+settings['inputs']['dates'][1]+'.csv')):
-            output_waterelev = Toolbox.GetWaterElevs(settings, dates_sat)
-        else:
-            print('No tide data exists - skipping GetWaterElevs.\n')
-            output_waterelev = list(np.empty(len(dates_sat)) * np.nan)
-        
-        output[satname]['tideelev'] = output_waterelev
-        output_latlon[satname]['tideelev'] = output_waterelev
-        output_proj[satname]['tideelev'] = output_waterelev
         
         # Save output after each platform is completed
         with open(os.path.join(filepath_out, sitename + '_output.pkl'), 'wb') as f:
@@ -837,7 +882,7 @@ def classify_image_NN_shore(im_ms, im_extra, cloud_mask, min_beach_area, clf, PS
     vec_classif = np.nan*np.ones((cloud_mask.shape[0]*cloud_mask.shape[1]))
     vec_classif[~vec_mask] = labels
     im_classif = vec_classif.reshape((cloud_mask.shape[0], cloud_mask.shape[1]))
-
+    print("Unique values in im_classif:", np.unique(im_classif))
     # create a stack of boolean images for each label
     im_sand = im_classif == 1
     im_swash = im_classif == 2
@@ -965,7 +1010,7 @@ def FindShoreContours_Enhc(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     return contours_ndi, t_ndi
     
 
-def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
+def FindShoreContours_Water_HT(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     """
     New robust method for extracting wet-dry boundaries. Incorporates the NN classification
     component to refine the Otsu threshold and make it specific to the inter-class interface.
@@ -1050,6 +1095,91 @@ def FindShoreContours_Water(im_ndi, im_labels, cloud_mask, im_ref_buffer):
 
     return contours_ndi, t_ndi, int_water, int_nonwater
 
+
+def FindShoreContours_Water_LT(im_ndi, im_labels, cloud_mask, im_ref_buffer):
+    """
+    New robust method for extracting wet-dry boundaries. Incorporates the NN classification
+    component to refine the Otsu threshold and make it specific to the inter-class interface.
+    """
+
+    nrows = cloud_mask.shape[0]
+    ncols = cloud_mask.shape[1]
+
+    # reshape spectral index image to vector
+    vec_ndi = im_ndi.reshape(nrows * ncols)
+
+    vec_water = im_labels[:, :, 2].reshape(nrows * ncols)
+    vec_nonwater = im_labels[:, :, 0].reshape(nrows * ncols)
+
+    print("Total water pixels:", np.sum(vec_water))
+    print("Total sand pixels:", np.sum(vec_nonwater))
+
+    # Buffer: dilate reference buffer and use it
+    se = morphology.disk(5)
+    im_ref_buffer_extra = np.ones_like(im_ref_buffer, dtype=bool)
+    vec_buffer = im_ref_buffer_extra.reshape(nrows * ncols)
+
+    # Select water/sand pixels within buffer
+    int_water = vec_ndi[np.logical_and(vec_buffer, vec_water)]
+    int_nonwater = vec_ndi[np.logical_and(vec_buffer, vec_nonwater)]
+
+    # Handle empty cases
+    if len(int_water) == 0 and len(int_nonwater) == 0:
+        print("No sand or water pixels — skip image.")
+        return None, None, None, None
+
+    elif len(int_water) == 0:
+        print("No water pixels — using inverse of sand mask.")
+        vec_water = np.logical_not(vec_nonwater)
+        int_water = vec_ndi[np.logical_and(vec_buffer, vec_water)]
+
+    elif len(int_nonwater) == 0:
+        print("No sand pixels — using inverse of water mask.")
+        vec_nonwater = np.logical_not(vec_water)
+        int_nonwater = vec_ndi[np.logical_and(vec_buffer, vec_nonwater)]
+
+    # Equalize class sizes
+    if len(int_water) > 0 and len(int_nonwater) > 0:
+        if len(int_water) < len(int_nonwater):
+            int_nonwater = np.random.choice(int_nonwater, size=len(int_water), replace=False)
+        else:
+            int_water = np.random.choice(int_water, size=len(int_nonwater), replace=False)
+
+    # Combine all
+    int_all = np.append(int_water, int_nonwater)
+    int_all = int_all[~np.isnan(int_all)]
+
+    if len(int_all) == 0:
+        print("All intensities are NaN — skipping image")
+        return None, None, None, None
+
+    # Clip NDWI thresholding range
+    min_ndwi = -0.8
+    max_ndwi = 0.1
+    valid_range = (int_all >= min_ndwi) & (int_all <= max_ndwi)
+    int_all_clipped = int_all[valid_range]
+
+    if len(int_all_clipped) == 0:
+        print("No NDWI pixels in clipping range — using fallback threshold 0.1")
+        t_ndi = 0.1
+    else:
+        # Compute Otsu
+        t_ndi = filters.threshold_otsu(int_all_clipped)
+        print(f"Otsu threshold: {t_ndi:.3f}")
+
+        # Sanity check
+        if t_ndi < min_ndwi or t_ndi > max_ndwi:
+            print(f"Otsu threshold {t_ndi:.3f} out of range — using fallback 0.1")
+            t_ndi = 0.1
+
+    # Contour detection — **mask everything outside the buffer**
+    im_ndi_buffer = np.copy(im_ndi)
+    im_ndi_buffer[~im_ref_buffer_extra] = np.nan
+
+    contours_ndi = measure.find_contours(im_ndi_buffer, t_ndi)
+    contours_ndi = process_contours(contours_ndi)
+
+    return contours_ndi, t_ndi, int_water, int_nonwater
 
 def FindShoreContours_WP(im_ndi, im_labels, cloud_mask, im_ref_buffer):
     """
@@ -1644,26 +1774,36 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
 
     """
     
-    cmap = cm.get_cmap('tab20c')
-    colorpalette = cmap(np.arange(0,17,1))
-    colours = np.zeros((4,4))
-    # each row is RGBA for each class
-    colours[0,:] = colorpalette[9]  # veg
-    colours[1,:] = colorpalette[15]  # non-veg
-    colours[2,:] = colorpalette[1] # water
-    # colours[3,:] = colorpalette[16] # other
+    colours = {
+        "Vegetation": [0.1, 0.6, 0.1, 1.0],      # green
+        "Non-Vegetation": [0.6, 0.6, 0.6, 1.0],  # gray
+        "Sand": [0.95, 0.85, 0.6, 1.0],          # sand color
+        "Whitewater": [0.9, 0.9, 1.0, 1.0],      # light blue
+        "Water": [0.2, 0.5, 0.9, 1.0],           # blue
+    }
+    class_names = ["Vegetation", "Non-Vegetation", "Sand", "Whitewater", "Water"]
+    legend_patches = []
     
-    # set RGB levels for each class in image to the colours matching the classes above (using original RGB as template)
-    # for each class
-    for cl in range(0,im_labels.shape[2]):
-        # for each of the three colour values per class (R,G,B)
-        for ic, colour in enumerate(colours[cl,:3]):
-            # slice each class and each of the three colour arrays to set it to the matching class colours
-            im_class[im_labels[:,:,cl],ic] = colour
-        
-    if settings['wetdry'] == True:
-        for ic, colour in enumerate(colours[2,:3]):
-            im_class[sh_labels[:,:,2],ic] = colour
+    # VEGETATION LAYOUT
+    veg_class_names = ["Vegetation", "Non-Vegetation"]
+    for cl in range(im_labels.shape[2]):
+        name = veg_class_names[cl]
+        if name == "Non-Vegetation":
+            continue  # skip overlay
+        if np.any(im_labels[:,:,cl]):
+            for ic, v in enumerate(colours[name][:3]):
+                im_class[im_labels[:,:,cl], ic] = v
+
+    # WATER/ SAND LAYOUT (overwrite veg classification, but skip Whitewater)
+    shore_class_names = ["Sand", "Whitewater", "Water"]
+    if settings['wetdry']:
+        for cl, name in enumerate(shore_class_names):
+            if name == "Whitewater":
+                continue  # skip overlay of whitewater
+            if np.any(sh_labels[:,:,cl]):
+                for ic, v in enumerate(colours[name][:3]):
+                    im_class[sh_labels[:,:,cl], ic] = v
+
 
     # compute NDVI grayscale image (NIR - R)
     im_ndvi = Toolbox.nd_index(im_ms[:,:,3], im_ms[:,:,2], cloud_mask)
@@ -1676,12 +1816,24 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     im_RGB = np.where(np.isnan(im_RGB), nan_color, im_RGB)
     im_class = np.where(np.isnan(im_class), 1.0, im_class)
 
-    # create image 1 (RGB)
-    ax1.imshow(im_RGB)
-    im_ref_buffer_3d = np.repeat(im_ref_buffer[:,:,np.newaxis],3,axis=2)
-    im_RGB_masked = im_RGB * im_ref_buffer_3d
-    ax1.imshow(im_RGB_masked, alpha=0.3) # plot refline mask over top
+    # NEW - IMAGE 1 - NDWI
+    im_ndwi = Toolbox.nd_index(im_ms[:,:,3], im_ms[:,:,1], cloud_mask)
     
+    # Optionally mask by buffer
+    # im_ndwi[~im_ref_buffer] = np.nan
+    
+    # Show NDWI
+    ndwi_plot = ax1.imshow(im_ndwi, cmap='BrBG', vmin=-1, vmax=1)
+    ax1.axis('off')
+    ax1.set_title(sitename + " NDWI", fontweight='bold', fontsize=16)
+    
+    # Add buffer outline
+    ax1.contour(im_ref_buffer, colors='lime', linewidths=1)
+    
+    # Add colorbar
+    cbar = plt.colorbar(ndwi_plot, ax=ax1, fraction=0.046, pad=0.04)
+    cbar.set_label("NDWI", fontsize=10)
+
     ax1.axis('off')
     ax1.set_title(sitename, fontweight='bold', fontsize=16)
 
@@ -1690,21 +1842,38 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     # if settings['wetdry'] == True:
     #     ax2.imshow(sh_class)
     ax2.axis('off')
-    purple_patch = mpatches.Patch(color=colours[0,:], label='Vegetation')
-    green_patch = mpatches.Patch(color=colours[1,:], label='Non-Vegetation')
-    black_line = mlines.Line2D([],[],color='k',linestyle='-', label='Vegetation Line')
-    if settings['wetdry'] == True:
-        blue_patch = mpatches.Patch(color=colours[2,:], label='Water')
-        blue_line = mlines.Line2D([],[],color='b',linestyle='-', label='Water Line')
-        ax2handles = [purple_patch,green_patch,blue_patch,black_line,blue_line]
-    else:
-        ax2handles = [purple_patch,green_patch,black_line]
-    ax2.legend(handles=ax2handles,
-               bbox_to_anchor=(1, 1), fontsize=10)
-    ax2.set_title(date, fontweight='bold', fontsize=16)
+
+    # BUILD LEGEND
+    # VEG legend
+    for cl in range(im_labels.shape[2]):
+        name = veg_class_names[cl]
+        if name == "Non-Vegetation":
+            continue  # skip legend
+        if np.any(im_labels[:,:,cl]):
+            legend_patches.append(mpatches.Patch(color=colours[name], label=name))
+
+    # Shoreline legend
+    if settings['wetdry']:
+        for cl, name in enumerate(shore_class_names):
+            if name == "Whitewater":
+                continue  # skip legend patch
+            if np.any(sh_labels[:,:,cl]):
+                legend_patches.append(mpatches.Patch(color=colours[name], label=name))
+
+    
+    # Lines
+    black_line = mlines.Line2D([], [], color='k', linestyle='-', label='Vegetation Line')
+    blue_line = mlines.Line2D([], [], color='b', linestyle='-', label='Water Line')
+    legend_patches += [black_line, blue_line]
+    
+    # Create legend
+    ax2.legend(handles=legend_patches, bbox_to_anchor=(1, 1), fontsize=10)
+
 
     # create image 3 (NDVI)
     ndviplot = ax3.imshow(im_ndvi, cmap='bwr')
+    ax3.contour(im_ref_buffer, colors='lime', linewidths=1)
+
     int_veg = im_ndvi[im_labels[:,:,0]]
     int_nonveg = im_ndvi[im_labels[:,:,1]] 
     labels_other = np.logical_and(~im_labels[:,:,0],~im_labels[:,:,1]) # for only veg/nonveg
@@ -1745,10 +1914,11 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     ax4.set(ylabel='PDF',yticklabels=[], xlim=[-1,1])    
     if len(int_nonveg_clip) > 0 and sum(~np.isnan(int_nonveg_clip)) > 0:
         bins = np.arange(-1, 1, binwidth)
-        ax4.hist(int_nonveg_clip, bins=bins, density=True, color=colours[1,:], label='Non-Vegetation')
+        ax4.hist(int_nonveg_clip, bins=bins, density=True, color=colours["Non-Vegetation"][:3]
+, label='Non-Vegetation')
     if len(int_veg_clip) > 0 and sum(~np.isnan(int_veg_clip)) > 0:
         bins = np.arange(-1, 1, binwidth)
-        ax4.hist(int_veg_clip, bins=bins, density=True, color=colours[0,:], label='Vegetation', alpha=0.6)
+        ax4.hist(int_veg_clip, bins=bins, density=True, color=colours["Vegetation"][:3], label='Vegetation', alpha=0.6)
     # if len(int_other) > 0 and sum(~np.isnan(int_other)) > 0:
     #     bins = np.arange(-1, 1, binwidth)
     #     ax4.hist(int_other, bins=bins, density=True, color='C7', label='other', alpha=0.5) 
@@ -1792,6 +1962,7 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     plt.draw() # to update the plot
 
     return fig, ax1, ax2, ax3, ax4, t_line, im_ndvi_buffer, vlplots
+
 
 
 def show_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, image_epsg, georef,
