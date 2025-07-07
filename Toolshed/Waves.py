@@ -146,6 +146,11 @@ def ReadWaveFile(WaveFilePath):
         
         #  Fill empty cells of each raster in stack using interpolation
         for t in range(SigWaveHeight.shape[0]):
+            # NEW TROUBLESHOTTING SHAPE PROBLEM
+            print("Wave height array shape:", SigWaveHeight.shape)
+            print("Wave height slice shape:", SigWaveHeight[t].shape)
+            print("Wave height slice contents:", SigWaveHeight[t])
+
             SigWaveHeight[t] = Toolbox.InterpolateRaster(SigWaveHeight[t])
             PeakWavePer[t] = Toolbox.InterpolateRaster(PeakWavePer[t])
             # catch empty wave data and fill with nan

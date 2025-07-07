@@ -50,8 +50,8 @@ np.seterr(all='ignore') # raise/ignore divisions by 0 and nans
 
 def CollectMetadata(inputs, Sat):
     """
-    Compile Google Earth Engine metadata together to create a collection of image properties. 
-    FM 2022 (updated Nov 2024)
+    Compile Google Earth Engine metadata together to create a collection of image properties,
+    including tide level.
 
     Parameters
     ----------
@@ -64,58 +64,93 @@ def CollectMetadata(inputs, Sat):
     -------
     metadata : dict
         Dictionary of image metadata.
-
     """
-    
-    
+    import pandas as pd
+    from datetime import datetime, timezone
+
     sat_list = inputs['sat_list']
     filepath_data = inputs['filepath']
     sitename = inputs['sitename']
-    
-    # Planet data must be loaded locally (while API is still sluggish)
-    # TO DO: incorporate in so that metadata can consist of Landsat, Sentinel AND Planet
+
+    # Always load tide data
+    tide_csv_path = os.path.join("tide_data", "tide_data_utc.csv")
+    df_tide = pd.read_csv(tide_csv_path)
+    df_tide["date"] = pd.to_datetime(df_tide["date"])
+
+    # Handle Planet images
     if 'PSScene4Band' in sat_list:
         metadata = LocalImageMetadata(inputs, Sat)
-    
-    else: 
+
+    else:
         filename = sitename + '_metadata.pkl'
         filepath = os.path.join(filepath_data, sitename)
-        
+
         if filename in os.listdir(filepath):
             print('Metadata already exists and was loaded')
             with open(os.path.join(filepath, filename), 'rb') as f:
                 metadata = pickle.load(f)
             return metadata
-        
+
         print('making metadata dictionary...')
         metadata = dict([])
-    
+
+        # Initialize metadata keys
         for i in range(len(sat_list)):
-            metadata[sat_list[i]] = {'filenames':[], 'acc_georef':[], 'epsg':[], 'dates':[]}
-    
+            metadata[sat_list[i]] = {
+                'filenames': [],
+                'acc_georef': [],
+                'epsg': [],
+                'dates': [],
+                'tide_level': []  # <== Added
+            }
+
+        # Loop over all images
         for i in range(len(Sat)):
             Features = Sat[i].getInfo().get('features')
             for j in range(len(Features)):
                 Feature = Features[j]
+
                 if sat_list[i] != 'S2':
-                    metadata[sat_list[i]]['filenames'].append(Feature['id'])
+                    img_id = Feature['id']
+                    date_str = Feature['properties']['DATE_ACQUIRED']
+                    dt = datetime.strptime(date_str, '%Y-%m-%d')
+                else:
+                    img_id = Feature['id']
+                    d = datetime.strptime(Feature['properties']['DATATAKE_IDENTIFIER'][5:13], '%Y%m%d')
+                    date_str = d.strftime('%Y-%m-%d')
+                    dt = d
+
+                # Append standard metadata
+                metadata[sat_list[i]]['filenames'].append(img_id)
+                metadata[sat_list[i]]['dates'].append(date_str)
+
+                if sat_list[i] != 'S2':
                     metadata[sat_list[i]]['acc_georef'].append(Feature['properties']['GEOMETRIC_RMSE_MODEL'])
                     metadata[sat_list[i]]['epsg'].append(int(Feature['bands'][0]['crs'].lstrip('EPSG:')))
-                    metadata[sat_list[i]]['dates'].append(Feature['properties']['DATE_ACQUIRED'])
                 else:
-                    metadata[sat_list[i]]['filenames'].append(Feature['id'])
                     metadata[sat_list[i]]['acc_georef'].append(Feature['bands'][1]['crs_transform'])
                     metadata[sat_list[i]]['epsg'].append(int(Feature['bands'][1]['crs'].lstrip('EPSG:')))
-                    d = datetime.strptime(Feature['properties']['DATATAKE_IDENTIFIER'][5:13],'%Y%m%d')
-                    metadata[sat_list[i]]['dates'].append(str(d.strftime('%Y-%m-%d')))
-                
-                print('\r'+sat_list[i],": ",round(100*(j+1)/len(Features)),'%   ', end='')
+
+                # Get tide level
+                dt_utc = dt.replace(tzinfo=timezone.utc)
+                day_df = df_tide[df_tide["date"].dt.date == dt_utc.date()]
+                if not day_df.empty:
+                    closest_idx = (day_df["date"] - dt_utc).abs().idxmin()
+                    closest_row = day_df.loc[closest_idx]
+                    tide_height = closest_row["tide"]
+                else:
+                    tide_height = None  # or np.nan
+
+                metadata[sat_list[i]]['tide_level'].append(tide_height)
+
+                print('\r' + sat_list[i], ": ", round(100 * (j + 1) / len(Features)), '%   ', end='')
             print("Done")
-        
+
         with open(os.path.join(filepath, sitename + '_metadata.pkl'), 'wb') as f:
             pickle.dump(metadata, f)
-        
+
     return metadata
+
 
 
         
@@ -254,51 +289,80 @@ def LocalImageMetadata(inputs, Sat):
     """
     Extracts metadata info from local image filepaths and creates dict of info.
     FM Apr 2022
-    
-    filenames: filepaths and filenames from Sat list 
+
+    filenames: filepaths and filenames from Sat list
     acc_georef: affine matrix for georeferencing transformations
-    
     """
-    
+    import pandas as pd
+    from datetime import datetime, timezone
+
     filename = inputs['sitename'] + '_metadata.pkl'
     filepath = os.path.join(inputs['filepath'], inputs['sitename'])
-    
+
+    # Load tide data
+    tide_csv_path = os.path.join("tide_data", "tide_data_utc.csv")
+    df_tide = pd.read_csv(tide_csv_path)
+    df_tide["date"] = pd.to_datetime(df_tide["date"])
+
     if filename in os.listdir(filepath):
         print('Metadata already exists and was loaded')
         with open(os.path.join(filepath, filename), 'rb') as f:
             metadata = pickle.load(f)
         return metadata
-    
+
     metadata = dict([])
 
-    # NEW - because Sat may start with null list
     for i in range(len(inputs['sat_list'])):
         if len(Sat[i]) == 0:
             continue  # skip if no images!
-    
-        metadata[inputs['sat_list'][i]] = {'filenames':[], 'acc_georef':[], 'epsg':[], 'dates':[]}
-    
+
+        metadata[inputs['sat_list'][i]] = {
+            'filenames': [],
+            'acc_georef': [],
+            'epsg': [],
+            'dates': [],
+            'tide_level': []  # NEW
+        }
+
         for j in range(len(Sat[i])):
             img_path = Sat[i][j]
             imdata = rasterio.open(img_path)
-    
-            # get metadata
+
+            # Append file path
             metadata[inputs['sat_list'][i]]['filenames'].append(img_path)
             metadata[inputs['sat_list'][i]]['acc_georef'].append(list(imdata.transform)[0:6])
             metadata[inputs['sat_list'][i]]['epsg'].append(str(imdata.crs).lstrip('EPSG:'))
-    
-            # date information from file name
+
+            # Extract date and time from filename
             basename = os.path.basename(img_path)
             try:
-                date = datetime.strptime(basename[0:8], '%Y%m%d')
-                metadata[inputs['sat_list'][i]]['dates'].append(str(date.strftime('%Y-%m-%d')))
+                # Expecting filenames like "20230122_145737_something.tif"
+                parts = basename.split("_")
+                date_str = parts[0]
+                time_str = parts[1]
+                dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
+                dt_utc = dt.replace(tzinfo=timezone.utc)
+                metadata[inputs['sat_list'][i]]['dates'].append(str(dt.strftime('%Y-%m-%d')))
+
+                # Find closest tide record
+                day_df = df_tide[df_tide["date"].dt.date == dt_utc.date()]
+                if not day_df.empty:
+                    closest_idx = (day_df["date"] - dt_utc).abs().idxmin()
+                    closest_row = day_df.loc[closest_idx]
+                    tide_height = closest_row["tide"]
+                else:
+                    tide_height = None
+
+                metadata[inputs['sat_list'][i]]['tide_level'].append(tide_height)
+
             except Exception as e:
-                print(f"Date extraction failed for {basename}: {e}")
+                print(f"Date/time extraction failed for {basename}: {e}")
                 metadata[inputs['sat_list'][i]]['dates'].append(None)
-    
-        # NEW process print out
+                metadata[inputs['sat_list'][i]]['tide_level'].append(None)
+
         print(f"{inputs['sat_list'][i]}: {(100*(j+1)/len(Sat[i])):.2f}%", end='\r')
-        return metadata
+
+    return metadata
 
 
 
@@ -426,6 +490,9 @@ def CMSDownload(CMScmd):
                 output_directory = str(CMScmd['WavePath'])
                 )  
         else:
+            print("  Longitude:", CMScmd["lonmin"], "to", CMScmd["lonmax"])
+            print("  Latitude :", CMScmd["latmin"], "to", CMScmd["latmax"])
+            print("  Dates    :", CMScmd["DateMin"], "to", CMScmd["DateMax"])
             # Download multiyear data (up to ~1yr prior to present)
             MYrWavePath = cms.subset(
                 dataset_id = 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', 
@@ -452,9 +519,19 @@ def CMSDownload(CMScmd):
                 output_filename = str(CMScmd['WaveOutFile'][:-3]+'_int.nc'),  
                 output_directory = str(CMScmd['WavePath'])
                 )
+
+            MYrWavePath = os.path.join(
+                CMScmd['WavePath'],
+                str(CMScmd['WaveOutFile'][:-3] + "_my.nc")
+            )
+            IntWavePath = os.path.join(
+                CMScmd['WavePath'],
+                str(CMScmd['WaveOutFile'][:-3] + "_int.nc")
+            )
             
             # Combine multiyear and interim data into one dataset
-            CombiData = xr.open_mfdataset([str(MYrWavePath),IntWavePath],combine='nested', concat_dim='time', engine='netcdf4')
+            CombiData = xr.open_mfdataset([MYrWavePath,IntWavePath],combine='nested', concat_dim='time', engine="netcdf4")
+
             # Save combined dataset to new netCDF file under desired name
             CombiData.to_netcdf(os.path.join(CMScmd['WavePath'],CMScmd['WaveOutFile']))
             # Clean up folder by deleting multiyear and interim files
@@ -504,7 +581,10 @@ def CMSDownload(CMScmd):
         
         # If requesting a hindcast, use 'Global Ocean Waves Reanalysis' data from Copernicus
         elif CMScmd['hind_fore'] == 'hind':
-            # Download multiyear data (up to ~1yr prior to present)
+            print("  Longitude:", CMScmd["lonmin"], "to", CMScmd["lonmax"])
+            print("  Latitude :", CMScmd["latmin"], "to", CMScmd["latmax"])
+            print("  Dates    :", CMScmd["DateMin"], "to", CMScmd["DateMax"])
+            # Download multiyear data (up to ~1yr prior to present)            
             MYrWavePath = cms.subset(
                 dataset_id = 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', 
                 variables = ['VHM0', 'VMDR','VTPK'],
@@ -517,6 +597,7 @@ def CMSDownload(CMScmd):
                 output_filename = str(CMScmd['WaveOutFile'][:-3]+'_my.nc'),  
                 output_directory = str(CMScmd['WavePath'])
                 )
+            
             # Download interim data (up to ~4mo prior to present)
             IntWavePath = cms.subset(
                 dataset_id = 'cmems_mod_glo_wav_myint_0.2deg_PT3H-i', 
@@ -532,9 +613,16 @@ def CMSDownload(CMScmd):
                 )
             
             # Combine multiyear and interim data into one dataset
-            print("DEBUG MyWavePath:", MyWavePath)
-            print("Type:", type(MyWavePath))
-            CombiData = xr.open_mfdataset([str(MYrWavePath),IntWavePath],combine='nested', concat_dim='time', engine='netcdf4')
+            MYrWavePath = os.path.join(
+                CMScmd['WavePath'],
+                str(CMScmd['WaveOutFile'][:-3] + "_my.nc")
+            )
+            IntWavePath = os.path.join(
+                CMScmd['WavePath'],
+                str(CMScmd['WaveOutFile'][:-3] + "_int.nc")
+            )
+            CombiData = xr.open_mfdataset([MYrWavePath,IntWavePath],combine='nested', concat_dim='time', engine="netcdf4")
+            
             # Save combined dataset to new netCDF file under desired name
             CombiData.to_netcdf(os.path.join(CMScmd['WavePath'],CMScmd['WaveOutFile']))
             # Clean up folder by deleting multiyear and interim files
