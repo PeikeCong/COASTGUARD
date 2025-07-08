@@ -1707,7 +1707,7 @@ def process_shoreline(contours, cloud_mask, georef, image_epsg, settings):
 
 def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
                     im_ref_buffer, date, satname,
-                    fig, ax1, ax2, ax3, ax4,
+                    fig, ax1, ax2, ax3, ax4, ax5,
                     contours_ndvi, t_ndvi, cloud_mask, georef, image_epsg,
                     sh_classif, sh_labels, contours_ndwi, t_ndwi):
     """
@@ -1788,8 +1788,6 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     veg_class_names = ["Vegetation", "Non-Vegetation"]
     for cl in range(im_labels.shape[2]):
         name = veg_class_names[cl]
-        if name == "Non-Vegetation":
-            continue  # skip overlay
         if np.any(im_labels[:,:,cl]):
             for ic, v in enumerate(colours[name][:3]):
                 im_class[im_labels[:,:,cl], ic] = v
@@ -1843,12 +1841,18 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     #     ax2.imshow(sh_class)
     ax2.axis('off')
 
+    # create image 5 - RGB
+    ax5.imshow(im_RGB)
+    im_ref_buffer_3d = np.repeat(im_ref_buffer[:,:,np.newaxis],3,axis=2)
+    im_RGB_masked = im_RGB * im_ref_buffer_3d
+    ax5.imshow(im_RGB_masked, alpha=0.3)
+    ax5.axis('off')
+    ax5.set_title(sitename, fontweight='bold', fontsize=16)
+
     # BUILD LEGEND
     # VEG legend
     for cl in range(im_labels.shape[2]):
         name = veg_class_names[cl]
-        if name == "Non-Vegetation":
-            continue  # skip legend
         if np.any(im_labels[:,:,cl]):
             legend_patches.append(mpatches.Patch(color=colours[name], label=name))
 
@@ -1961,8 +1965,7 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     ax4.legend(loc=1)
     plt.draw() # to update the plot
 
-    return fig, ax1, ax2, ax3, ax4, t_line, im_ndvi_buffer, vlplots
-
+    return fig, ax1, ax2, ax3, ax4, ax5, t_line, im_ndvi_buffer, vlplots
 
 
 def show_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, image_epsg, georef,
@@ -2026,55 +2029,41 @@ def show_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, image_epsg, geor
     else:
         date_str = datetime.strptime(date,'%Y-%m-%d').strftime('%Y-%m-%d')
 
-    im_RGB = Image_Processing.rescale_image_intensity(im_ms[:,:,[2,1,0]], cloud_mask, 99.9)
-    # compute colours for classified image
+    # Rescale RGB image and prepare for classification overlay
+    im_RGB = Image_Processing.rescale_image_intensity(im_ms[:, :, [2, 1, 0]], cloud_mask, 99.9)
     im_class = np.copy(im_RGB)
-    # sh_class = np.copy(im_RGB)
-    if plt.get_fignums():
-            # get open figure if it exists
-            fig = plt.gcf()
-            ax1 = fig.axes[0]
-            ax2 = fig.axes[1]
-            ax3 = fig.axes[2]
-            ax4 = fig.axes[3]
-    else:
-        # else create a new figure
-        fig = plt.figure()
-        fig.set_size_inches([18, 9])
-        mng = plt.get_current_fig_manager()
-        if hasattr(mng, 'window'):
-            try:
-                mng.window.showMaximized()
-            except Exception as e:
-                print(f"Warning: Could not maximize window — {e}")
-        else:
-            print("No window attribute in the figure manager; running in headless mode.")
-        # according to the image shape, decide whether it is better to have the images
-        # in vertical subplots or horizontal subplots
-        if im_RGB.shape[1] > 2.5*im_RGB.shape[0]:
-            # vertical subplots (plot in rows)
-            gs = gridspec.GridSpec(4, 1)
-            gs.update(bottom=0.05, top=0.95, left=0.03, right=0.97)
-            ax1 = fig.add_subplot(gs[0,0])
-            ax2 = fig.add_subplot(gs[1,0], sharex=ax1, sharey=ax1)
-            ax3 = fig.add_subplot(gs[2,0], sharex=ax1, sharey=ax1)
-            ax4 = fig.add_subplot(gs[3,0])
-
-        else:
-            # horizontal subplots (plot in columns)
-            gs = gridspec.GridSpec(2, 3, height_ratios=[4,1])
-            gs.update(bottom=0.05, top=0.95, left=0.05, right=0.95)
-            ax1 = fig.add_subplot(gs[0,0])
-            ax2 = fig.add_subplot(gs[0,1], sharex=ax1, sharey=ax1)
-            ax3 = fig.add_subplot(gs[0,2], sharex=ax1, sharey=ax1)
-            ax4 = fig.add_subplot(gs[1,:])
-        
-    fig, ax1, ax2, ax3, ax4, t_line, im_ndvi_buffer, vlplots = SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
-                                                      im_ref_buffer, date, satname,
-                                                      fig, ax1, ax2, ax3, ax4,
-                                                      contours_ndvi, t_ndvi, cloud_mask, georef, image_epsg,
-                                                      sh_classif, sh_labels, contours_ndwi, t_ndwi)
     
+    # Always create a new figure
+    fig = plt.figure()
+    fig.set_size_inches([18, 9])
+    
+    mng = plt.get_current_fig_manager()
+    if hasattr(mng, 'window'):
+        try:
+            mng.window.showMaximized()
+        except Exception as e:
+            print(f"Warning: Could not maximize window — {e}")
+    else:
+        print("No window attribute in the figure manager; running in headless mode.")
+    
+    # Fixed 2-row layout: 4 on top, 1 wide below
+    gs = gridspec.GridSpec(2, 4, height_ratios=[4, 1])
+    gs.update(bottom=0.05, top=0.95, left=0.03, right=0.97, wspace=0.1)
+    
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1], sharex=ax1, sharey=ax1)
+    ax3 = fig.add_subplot(gs[0, 2], sharex=ax1, sharey=ax1)
+    ax4 = fig.add_subplot(gs[1, :])  # bottom full-width plot
+    ax5 = fig.add_subplot(gs[0, 3])  # fourth top row plot
+    
+    # Call the detection plotting setup
+    fig, ax1, ax2, ax3, ax4, ax5, t_line, im_ndvi_buffer, vlplots = SetUpDetectPlot(
+        sitename, settings, im_ms, im_RGB, im_class, im_labels,
+        im_ref_buffer, date, satname,
+        fig, ax1, ax2, ax3, ax4, ax5,
+        contours_ndvi, t_ndvi, cloud_mask, georef, image_epsg,
+        sh_classif, sh_labels, contours_ndwi, t_ndwi
+    )
 
     # if check_detection is True, let user manually accept/reject the images
     skip_image = False
@@ -2220,7 +2209,7 @@ def adjust_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, vegline, vegli
     else:
         # else create a new figure
         fig = plt.figure()
-        fig.set_size_inches([18, 9])
+        fig.set_size_inches([15, 6])
         mng = plt.get_current_fig_manager()
         if hasattr(mng, 'window'):
             try:
@@ -2230,28 +2219,24 @@ def adjust_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, vegline, vegli
         else:
             print("No window attribute in the figure manager; running in headless mode.")
         # according to the image shape, decide whether it is better to have the images
-        # in vertical subplots or horizontal subplots
-        if im_RGB.shape[1] > 2.5*im_RGB.shape[0]:
-            # vertical subplots (plot in rows)
-            gs = gridspec.GridSpec(4, 1)
-            gs.update(bottom=0.05, top=0.95, left=0.03, right=0.97)
-            ax1 = fig.add_subplot(gs[0,0])
-            ax2 = fig.add_subplot(gs[1,0], sharex=ax1, sharey=ax1)
-            ax3 = fig.add_subplot(gs[2,0], sharex=ax1, sharey=ax1)
-            ax4 = fig.add_subplot(gs[3,0])
-
-        else:
-            # horizontal subplots (plot in columns)
-            gs = gridspec.GridSpec(2, 3, height_ratios=[4,1])
-            gs.update(bottom=0.05, top=0.95, left=0.05, right=0.95)
-            ax1 = fig.add_subplot(gs[0,0])
-            ax2 = fig.add_subplot(gs[0,1], sharex=ax1, sharey=ax1)
-            ax3 = fig.add_subplot(gs[0,2], sharex=ax1, sharey=ax1)
-            ax4 = fig.add_subplot(gs[1,:])
         
-    fig, ax1, ax2, ax3, ax4, t_line, im_ndvi_buffer, vlplots = SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
+        # NEW - ADD NDWI in vertical subplots or horizontal subplots
+        gs = gridspec.GridSpec(2, 4, height_ratios=[4, 1])
+        gs.update(bottom=0.05, top=0.95, left=0.03, right=0.97, wspace=0.1)
+        
+        # First row: 4 side-by-side plots
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax2 = fig.add_subplot(gs[0, 1], sharex=ax1, sharey=ax1)
+        ax3 = fig.add_subplot(gs[0, 2], sharex=ax1, sharey=ax1)
+        ax5 = fig.add_subplot(gs[0, 3], sharex=ax1, sharey=ax1)
+        
+        # Second row: 1 full-width plot
+        ax4 = fig.add_subplot(gs[1, :])
+
+        
+    fig, ax1, ax2, ax3, ax4, ax5, t_line, im_ndvi_buffer, vlplots = SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
                                                       im_ref_buffer, date, satname,
-                                                      fig, ax1, ax2, ax3, ax4,
+                                                      fig, ax1, ax2, ax3, ax4, ax5,
                                                       contours_ndvi, t_ndvi, cloud_mask, georef, image_epsg,
                                                       sh_classif, sh_labels, contours_ndwi, t_ndwi)
     
