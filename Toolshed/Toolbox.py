@@ -2636,7 +2636,12 @@ def GetWaterElevs(settings, Dates_Sat, Daily=False):
     # Load tidal data from fixed local file
     TideFilepath = os.path.join("tide_data", "tide_data_utc.csv")
     Tide_Data = pd.read_csv(TideFilepath, parse_dates=['date'])
-    Tide_Data['date'] = Tide_Data['date'].dt.tz_localize('UTC')
+    
+    if Tide_Data['date'].dt.tz is None:
+        Tide_Data['date'] = Tide_Data['date'].dt.tz_localize('UTC')
+    else:
+        Tide_Data['date'] = Tide_Data['date'].dt.tz_convert('UTC')
+
     Tide_Data.set_index('date', inplace=True)
 
     Tides_Sat = []
