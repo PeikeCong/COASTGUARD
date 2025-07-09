@@ -285,8 +285,10 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                 # Classify using fixed threshold
                 if np.isnan(tide):
                     tidetype = "unknown"
-                elif tide < 5.3:
+                elif tide < 3.2:
                     tidetype = "low"
+                elif tide < 5.5:
+                    tidetype = "middle"
                 else:
                     tidetype = "high"
                 output_tidetype.append(tidetype)
@@ -303,7 +305,6 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                         im_ndwi, sh_labels, cloud_mask, im_ref_buffer
                     )
 
-                
                 # --- Check if no contours ---
                 if contours_ndwi is None:
                     skipped['no_contours'].append([filenames[fn], satname, acqdate+' '+acqtime])
@@ -1761,7 +1762,7 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
     im_ndwi = Toolbox.nd_index(im_ms[:, :, 3], im_ms[:, :, 1], cloud_mask)
 
     # === Plot ax1: NDWI image
-    ndwi_plot = ax1.imshow(im_ndwi, cmap='BrBG', vmin=-1, vmax=1)
+    ndwi_plot = ax1.imshow(im_ndwi, cmap='BrBG_r', vmin=-1, vmax=1)
     ax1.axis('off')
     ax1.set_title(f"{sitename} NDWI", fontweight='bold', fontsize=12)
     # ax1.contour(im_ref_buffer, colors='lime', linewidths=1)
@@ -1790,7 +1791,7 @@ def SetUpDetectPlot(sitename, settings, im_ms, im_RGB, im_class, im_labels,
 
 
     # === Plot ax3: NDVI with transition zone
-    ndviplot = ax3.imshow(im_ndvi, cmap='bwr')
+    ndviplot = ax3.imshow(im_ndvi, cmap='RdYlGn')
     ax3.contour(im_ref_buffer, colors='lime', linewidths=1)
     ax3.axis('off')
     ax3.set_title('NDVI', fontweight='bold', fontsize=12)
