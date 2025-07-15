@@ -206,7 +206,8 @@ def GetIntersections(BasePath, TransectGDF, ShorelineGDF):
         Transects with newly added intersection info.
 
     """
-     
+    ShorelineGDF = ShorelineGDF.drop(columns=["tidetype"], errors="ignore")
+        
     print("performing intersections between transects...")
     
     # checking for mismatched coordinate systems
@@ -483,7 +484,8 @@ def GetWaterIntersections(BasePath, TransectGDF, TransectInterGDF, WaterlineGDF,
         GeoDataFrame of cross-shore transects with width between 
 
     """
-     
+
+    WaterlineGDF = WaterlineGDF.drop(columns=["tidetype"], errors="ignore"
     print("performing intersections between transects and waterlines...")
     
     # checking for mismatched coordinate systems
