@@ -13,7 +13,7 @@ import numpy as np
 import glob
 from functools import reduce
 import subprocess
-
+import pandas as pd
 
 # earth engine module
 import ee
@@ -28,7 +28,7 @@ import requests
 import time
 
 # additional modules
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytz
 import pickle
 from skimage import morphology, transform
@@ -293,8 +293,6 @@ def LocalImageMetadata(inputs, Sat):
     filenames: filepaths and filenames from Sat list
     acc_georef: affine matrix for georeferencing transformations
     """
-    import pandas as pd
-    from datetime import datetime, timezone
 
     filename = inputs['sitename'] + '_metadata.pkl'
     filepath = os.path.join(inputs['filepath'], inputs['sitename'])

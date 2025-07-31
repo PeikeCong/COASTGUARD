@@ -583,6 +583,9 @@ def preprocess_single(ImgColl, georef, fn, datelist, filenames, satname, setting
 
         # NEW change band ratio 8bands - 4bands
         im_ms = im_ms[[1, 3, 5, 7], :, :]
+        if np.max(im_ms) > 1:
+            im_ms = np.clip(im_ms, 0, 10000) / 10000.0
+
         
         # filename should be in the format 'yyyymmdd_HHMMSS_'
         acqtime = datetime.strftime(datetime.strptime(os.path.basename(filenames[fn])[9:15],'%H%M%S'),'%H:%M:%S.%f')

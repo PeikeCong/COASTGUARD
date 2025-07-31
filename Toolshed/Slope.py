@@ -12,7 +12,8 @@ import numpy as np
 import pytz
 import datetime
 from datetime import datetime, timedelta
-
+from pytz import UTC
+import os
 from scipy import integrate as sintegrate
 from scipy import signal as ssignal
 from scipy import interpolate as sinterpolate
@@ -26,7 +27,7 @@ from matplotlib import lines
 
 #%%
 
-def CoastSatSlope(dates_sat_tr, tides_sat_tr, cross_distances):
+def CoastSatSlope(dates_sat_tr, tides_sat_tr, cross_distances, settings_slope=None):
     """
     Run the main CoastSat.slope routines to get beach slope which minimises high
     frequency tidal fluctuations compared to lower-frequency erosion/accretion signals.
@@ -50,8 +51,17 @@ def CoastSatSlope(dates_sat_tr, tides_sat_tr, cross_distances):
     """
     # Slope calculation happens per-transect, so single value returned if only
     # one timeseries list is provided
-    settings_slope = DefineSlopeSettings(cross_distances)
+
+    dates_sat_tr = [dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt for dt in dates_sat_tr]
     
+    # use provided settings or create new
+    if settings_slope is None:
+        settings_slope = DefineSlopeSettings(cross_distances)
+        
+    settings_slope.setdefault("transect_id", None)
+    settings_slope.setdefault("out_folder", os.path.join(os.getcwd(), "tide_energy_img"))
+
+
     # find tidal peak frequency
     settings_slope['freqs_max'] = find_tide_peak(dates_sat_tr, tides_sat_tr, settings_slope)
     
@@ -62,7 +72,30 @@ def CoastSatSlope(dates_sat_tr, tides_sat_tr, cross_distances):
     
     tcorr = tide_correct(cross_distances, tides_sat_tr, settings_slope['beach_slopes'])
     slope_est, conf_ints = integrate_power_spectrum(dates_sat_tr, tcorr, settings_slope)
+
+
+    # --- NEW: save last 2 plots if folder and ID provided ---
+    transect_id = settings_slope.get("transect_id", None)
+    out_folder = settings_slope.get("out_folder", None)
     
+    if out_folder is not None and transect_id is not None:
+        os.makedirs(out_folder, exist_ok=True)
+        figs = [plt.figure(i) for i in plt.get_fignums()[-2:]]
+        fig_combined, axs = plt.subplots(1, 2, figsize=(14, 5))
+        for i, fig in enumerate(figs):
+            ax_src = fig.axes[0]
+            for line in ax_src.get_lines():
+                axs[i].plot(line.get_xdata(), line.get_ydata(), color=line.get_color())
+            axs[i].set_title(ax_src.get_title())
+            axs[i].set_xlim(ax_src.get_xlim())
+            axs[i].set_ylim(ax_src.get_ylim())
+            axs[i].grid(True)
+        fig_combined.tight_layout()
+        fig_combined.savefig(os.path.join(out_folder, f"transect_{transect_id}.png"), dpi=200)
+        plt.close(fig_combined)
+        for f in figs:
+            plt.close(f)
+
     return slope_est
     
 #%%
@@ -169,6 +202,13 @@ def find_tide_peak(dates, tide_level, settings_slope, Plot=True):
     idx_peaks,_ = ssignal.find_peaks(ps_tide, height=0)
     y_peaks = _['peak_heights']
     idx_peaks = idx_peaks[np.flipud(np.argsort(y_peaks))]
+
+    # NEW: check for valid peaks above cutoff before accessing [0]
+    valid_peaks = idx_peaks[freqs[idx_peaks] > settings_slope['freqs_cutoff']]
+    if len(valid_peaks) == 0:
+        raise ValueError("No valid tide peaks found above frequency cutoff. Check tide data quality or time span.")
+    
+    idx_max = valid_peaks[0]
     # find the strongest peak at the high frequency (defined by freqs_cutoff[1])
     idx_max = idx_peaks[freqs[idx_peaks] > settings_slope['freqs_cutoff']][0]
     # compute the frequencies around the max peak with some buffer (defined by buffer_coeff)
@@ -193,6 +233,17 @@ def find_tide_peak(dates, tide_level, settings_slope, Plot=True):
         ax.axvline(x=freqs_max[1], ls='--', c='0.5')
         ax.axvline(x=freqs_max[0], ls='--', c='0.5')
         ax.axvline(x=(2*settings_slope['n_days']*seconds_in_day)**-1, ls='--', c='k')
+
+        # New - add transects and save ADD THIS BLOCK
+        import os
+        transect_id = settings_slope.get("transect_id", None)
+        out_folder = settings_slope.get("out_folder", None)
+        if transect_id is not None and out_folder is not None:
+            os.makedirs(out_folder, exist_ok=True)
+            ax.text(1.01, 1.01, f'Transect {transect_id}', transform=ax.transAxes, fontsize=10, ha='right', va='top')
+            out_path = os.path.join(out_folder, f"transect_{transect_id}_spectrum.png")
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
     
     return freqs_max
 
@@ -280,6 +331,18 @@ def integrate_power_spectrum(dates_rand, tsall, settings_slope, Plot=True):
         ax.plot([ci[0],ci[0]],[ybottom,f(ci[0])],'k--',lw=1,zorder=0)
         ax.plot([ci[1],ci[1]],[ybottom,f(ci[1])],'k--',lw=1,zorder=0)
         ax.plot([ci[0],ci[1]],[ybottom,ybottom],'k--',lw=1,zorder=0)
+
+        # New - ADD THIS BLOCK TO SAVE FIGURE
+        import os
+        transect_id = settings_slope.get("transect_id", None)
+        out_folder = settings_slope.get("out_folder", None)
+        if transect_id is not None and out_folder is not None:
+            os.makedirs(out_folder, exist_ok=True)
+            ax.text(1.01, 1.01, f'Transect {transect_id}', transform=ax.transAxes, fontsize=10, ha='right', va='top')
+            out_path = os.path.join(out_folder, f"transect_{transect_id}_slope_energy.png")
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+
     
         
     return beach_slopes[np.argmin(E)], ci

@@ -254,6 +254,7 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                 skipped['no_contours'].append([filenames[fn], satname, acqdate+' '+acqtime])
                 print(' - Poor image quality: no contours generated.')
                 continue
+            '''
             # NEW - SAVE NDVI HISTOGRAM
             Image_Processing.save_NDVI_histogram(
             int_veg=int_veg,
@@ -261,7 +262,7 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
             t_ndvi=t_ndvi,
             date=acqdate,
             satname=satname,
-            settings=settings)
+            settings=settings)'''
 
             
             if settings['wetdry'] == True:
@@ -310,7 +311,7 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
                     skipped['no_contours'].append([filenames[fn], satname, acqdate+' '+acqtime])
                     print(' - Poor image quality: no water contours generated.')
                     continue
-
+            '''
             Image_Processing.save_NDWI_histogram(
             int_water=int_water,
             int_nonwater=int_nonwater,
@@ -318,7 +319,7 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
             date=acqdate,
             satname=satname,
             settings=settings
-        )
+        )'''
             
             # NEW - SAVE TIDE PLOT
             # Image_Processing.save_tide_plot(filename=os.path.basename(filenames[fn]), satname=satname, settings=settings)
@@ -2166,6 +2167,11 @@ def adjust_detection(im_ms, cloud_mask, im_labels, im_ref_buffer, vegline, vegli
         date_str = datetime.strptime(date,'%Y-%m-%d').strftime('%Y-%m-%d')
 
     im_RGB = Image_Processing.rescale_image_intensity(im_ms[:,:,[2,1,0]], cloud_mask, 99.9)
+    im_RGB = rescale_image_intensity(im_ms[:, :, [2, 1, 0]], cloud_mask, 99.9)
+    
+    # NEW TROUBLESHOT - Normalize for display
+    im_RGB = im_RGB / np.nanmax(im_RGB)
+
     # compute colours for classified image
     im_class = np.copy(im_RGB)
     # sh_class = np.copy(im_RGB)

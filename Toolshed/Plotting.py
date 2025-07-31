@@ -14,8 +14,8 @@ import warnings
 from datetime import datetime, timedelta
 import calendar
 warnings.filterwarnings("ignore")
-import pdb
 
+import matplotlib.patches as mpatches
 import matplotlib as mpl
 from matplotlib import cm
 import matplotlib.pyplot as plt
@@ -27,7 +27,7 @@ import matplotlib.dates as mdates
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import matplotlib.patheffects as PathEffects
 import matplotlib.font_manager as mplfm
-
+import seaborn as sns
 plt.ion()
 
 import rasterio
@@ -41,6 +41,18 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
+import geopandas as gpd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+import geopandas as gpd
+import folium
+from folium.plugins import MarkerCluster
+from folium.features import GeoJsonTooltip
+from branca.colormap import StepColormap
+from shapely.geometry import mapping
+import matplotlib.pyplot as plt
+import numpy as np
 
 mpl.rcParams.update(mpl.rcParamsDefault)
 mpl.rcParams['font.sans-serif'] = 'Arial'
@@ -186,6 +198,219 @@ def SatGIF(metadata,settings,output):
     anim.save(os.path.join(filepath_jpg, sitename + '_AnimatedImages.gif'),fps=3)
 
 
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+
+def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_k, Hemisphere='N', ShowPlot=True):
+    tide_high_thresh = 5.5
+    tide_low_thresh = 3.2
+
+    transect_features = []
+
+    for i in TransectIDs:
+        try:
+            dists = np.array(TransectInterGDFWater['wldists'].iloc[i], dtype=float)
+            tides = np.array(TransectInterGDFWater['tideelev'].iloc[i], dtype=float)
+
+            dists = np.nan_to_num(dists, nan=0.0)
+            tides = np.nan_to_num(tides, nan=0.0)
+
+            min_len = min(len(dists), len(tides))
+            if min_len == 0:
+                dists = np.zeros(1)
+                tides = np.zeros(1)
+            else:
+                dists = dists[:min_len]
+                tides = tides[:min_len]
+
+            low = dists[tides < tide_low_thresh]
+            mid = dists[(tides >= tide_low_thresh) & (tides <= tide_high_thresh)]
+            high = dists[tides > tide_high_thresh]
+
+            transect_features.append({
+                'TransectID': i,
+                'mean_all': np.mean(dists),
+                'std_all': np.std(dists),
+                'mean_low': np.mean(low) if len(low) else 0.0,
+                'std_low': np.std(low) if len(low) else 0.0,
+                'mean_mid': np.mean(mid) if len(mid) else 0.0,
+                'std_mid': np.std(mid) if len(mid) else 0.0,
+                'mean_high': np.mean(high) if len(high) else 0.0,
+                'std_high': np.std(high) if len(high) else 0.0,
+            })
+        except Exception as e:
+            print(f"Error in transect {i}: {e}")
+
+    df_feat = pd.DataFrame(transect_features)
+
+    if df_feat.empty:
+        print("No valid transect data to cluster.")
+        return
+
+    features = df_feat.drop(columns=['TransectID'])
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(features)
+
+    # Optional: Elbow plot
+    if ShowPlot:
+        inertias = []
+        ks = range(1, 21)
+        for k in ks:
+            km = KMeans(n_clusters=k, random_state=0).fit(X_scaled)
+            inertias.append(km.inertia_)
+
+        plt.figure(figsize=(5, 4))
+        plt.plot(ks, inertias, marker='o')
+        plt.xlabel('Number of Clusters (k)')
+        plt.ylabel('Inertia')
+        plt.title('Elbow Method for Optimal k')
+        plt.grid(True, linestyle=':')
+        plt.tight_layout()
+        plt.show()
+
+    km = KMeans(n_clusters=optimal_k, random_state=0)
+    df_feat['Cluster'] = km.fit_predict(X_scaled)
+
+    # === Plot histograms and save ===
+    plot_cols = ['mean_all', 'std_all', 'mean_low', 'std_low', 'mean_mid', 'std_mid', 'mean_high', 'std_high']
+    fig, axs = plt.subplots(4, 2, figsize=(10, 10), dpi=150)
+    axs = axs.flatten()
+
+    for i, col in enumerate(plot_cols):
+        for cluster_id in range(optimal_k):
+            axs[i].hist(
+                df_feat[df_feat['Cluster'] == cluster_id][col],
+                bins=10, alpha=0.6, label=f'Cluster {cluster_id}'
+            )
+        axs[i].set_title(col)
+        axs[i].legend()
+
+    plt.tight_layout()
+
+    # Save plot to file
+    outfilepath = os.path.join(os.getcwd(), 'Data', sitename, 'plots')
+    os.makedirs(outfilepath, exist_ok=True)
+    img_outfile = os.path.join(outfilepath, f"{optimal_k}_cluster_distribution.png")
+    fig.savefig(img_outfile)
+    print(f"Cluster distribution plot saved to: {img_outfile}")
+
+    if ShowPlot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    # Print cluster members
+    for cid in range(optimal_k):
+        members = df_feat[df_feat['Cluster'] == cid]['TransectID'].tolist()
+        print(f"Cluster {cid}: Transects {members}")
+
+    return df_feat
+
+
+
+def plot_transects_clusters_folium(TransectInterGDFWater, clustered_df, sitename, outfile='clustered_transects_map.html'):
+    """
+    Plots transects colored by cluster on an interactive Folium map and exports to Shapefile.
+
+    Parameters:
+    -----------
+    TransectInterGDFWater : GeoDataFrame
+        Original GeoDataFrame with 'geometry' and index matching TransectID.
+    clustered_df : DataFrame
+        DataFrame with 'TransectID' and 'Cluster' columns from clustering results.
+    sitename : str
+        Name of the site, used for saving files.
+    outfile : str
+        Path to save the HTML map.
+    """
+
+    # Merge geometry into cluster dataframe
+    merged_gdf = clustered_df.merge(
+        TransectInterGDFWater[['geometry']], 
+        left_on='TransectID', 
+        right_index=True
+    )
+    merged_gdf = gpd.GeoDataFrame(merged_gdf, geometry='geometry', crs=TransectInterGDFWater.crs)
+
+    # Reproject to lat/lon for web display
+    if merged_gdf.crs and not merged_gdf.crs.is_geographic:
+        merged_gdf = merged_gdf.to_crs(epsg=4326)
+
+    # Color palette setup
+    n_clusters = merged_gdf['Cluster'].nunique()
+    cmap = plt.cm.get_cmap('tab20', n_clusters)
+    color_dict = {i: f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}' 
+                  for i, (r, g, b, _) in enumerate(cmap(np.arange(n_clusters)))}
+
+    # Map center
+    center = merged_gdf.unary_union.centroid
+    m = folium.Map(location=[center.y, center.x], zoom_start=12, tiles='CartoDB Positron')
+
+    for _, row in merged_gdf.iterrows():
+        cluster_id = int(row['Cluster'])
+        geojson_feature = {
+            "type": "Feature",
+            "geometry": mapping(row["geometry"]),
+            "properties": {
+                "TransectID": int(row["TransectID"]),
+                "Cluster": cluster_id
+            }
+        }
+
+        folium.GeoJson(
+            geojson_feature,
+            style_function=lambda x, col=color_dict[cluster_id]: {
+                'color': col,
+                'weight': 2,
+                'opacity': 0.8
+            },
+            tooltip=GeoJsonTooltip(
+                fields=["TransectID", "Cluster"],
+                aliases=["Transect", "Cluster"],
+                sticky=True
+            )
+        ).add_to(m)
+
+    # Legend
+    cluster_ids = sorted(merged_gdf['Cluster'].unique())
+    colors = [color_dict[i] for i in cluster_ids]
+    colormap = StepColormap(
+        colors=colors,
+        index=cluster_ids + [cluster_ids[-1] + 1],
+        vmin=cluster_ids[0],
+        vmax=cluster_ids[-1],
+        caption='Cluster ID'
+    )
+    colormap.add_to(m)
+
+    # Save HTML map
+    m.save(outfile)
+    print(f"Interactive cluster map saved to: {outfile}")
+
+    # --- Save to QGIS-friendly file ---
+    outfilepath = os.path.join(os.getcwd(), 'Data', sitename, 'plots')
+    os.makedirs(outfilepath, exist_ok=True)
+    shp_filename = f"{n_clusters}_clustered_transects.shp"
+    shp_outfile = os.path.join(outfilepath, shp_filename)
+    merged_gdf.to_file(shp_outfile)
+    print(f"Shapefile saved to: {shp_outfile}")
+
+    return m
+
+
+
+
+
 
 
 
@@ -329,7 +554,177 @@ def VegTimeseries(sitename, TransectInterGDF, TransectIDs, Hemisphere='N', Title
     
     plt.show()
     
-    
+
+
+def WaterTimeseries(
+    sitename,
+    TransectInterGDF,
+    TransectIDs,
+    Hemisphere='N',
+    Titles=None,
+    ShowPlot=True,
+):
+    def moving_average(arr, n=3):
+        arr = np.asarray(arr, dtype=float)
+        ret = np.cumsum(np.nan_to_num(arr))
+        ret[n:] -= ret[:-n]
+        counts = np.cumsum(~np.isnan(arr))
+        counts[n:] -= counts[:-n]
+        return np.where(counts[n-1:] == 0, np.nan, ret[n-1:] / counts[n-1:])
+
+    def _trim_to_common_len(dates, *series):
+        lengths = [len(dates)] + [len(s) for s in series if s is not None]
+        L = min(lengths)
+        dates = dates[:L]
+        trimmed = [s[:L] if s is not None else None for s in series]
+        return (dates, *trimmed)
+
+    outdir = os.path.join(os.getcwd(), 'Data', sitename, 'plots')
+    os.makedirs(outdir, exist_ok=True)
+
+    if not ShowPlot:
+        plt.ioff()
+
+    if isinstance(TransectIDs, int):
+        TransectIDs = [TransectIDs]
+
+    for tid in TransectIDs:
+        try:
+            dates = [datetime.strptime(x, '%Y-%m-%d') for x in TransectInterGDF['wldates'].iloc[tid]]
+        except Exception:
+            dates = pd.to_datetime(TransectInterGDF['wldates'].iloc[tid])
+
+        raw = TransectInterGDF['wldists'].iloc[tid]
+        corr = TransectInterGDF['wlcorrdist'].iloc[tid] if 'wlcorrdist' in TransectInterGDF.columns else None
+        tide = TransectInterGDF['tideelev'].iloc[tid] if 'tideelev' in TransectInterGDF.columns else None
+
+        if len(dates) == 0:
+            print(f'Transect {tid} is empty – skipped.')
+            continue
+
+        dates, raw, corr, tide = _trim_to_common_len(dates, raw, corr, tide)
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 5), dpi=300, sharex=True)
+        mpl.rcParams.update({'font.size': 7})
+
+        # === Plot 1: Raw + Corrected + Tide ===
+        ax1.grid(ls=':', lw=0.5, color=[0.7, 0.7, 0.7])
+        if tide is not None:
+            tide_ax = ax1.twinx()
+            tide_ax.plot(dates, tide, '--', color='gray', lw=1.0, alpha=0.7, label='Tide Level')
+            tide_ax.set_ylim(0, 9)
+            tide_ax.set_ylabel('Tide Level [m]', color='gray')
+            tide_ax.tick_params(axis='y', labelcolor='gray')
+
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = tide_ax.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=6)
+        else:
+            ax1.legend(loc='upper left', fontsize=6)
+
+        ax1.plot(dates, raw, '-o', c='#92B3F4', ms=4, label='Raw Distance')
+        ax1.plot(dates, corr, '-o', c='#4056F4', ms=4, label='Corrected Distance')
+        ax1.set_ylabel('Distance [m]')
+        ax1.set_title(f'Transect {tid} | Tide, Raw, and Corrected Distance')
+
+        # === Plot 2: Corrected Only with Trend ===
+        ax2.grid(ls=':', lw=0.5, color=[0.7, 0.7, 0.7])
+        ax2.plot(dates, corr, '-o', c='#4056F4', ms=4, label='Corrected Distance')
+        if len(corr) >= 3:
+            ax2.plot(dates[1:-1], moving_average(corr), lw=1, c='#1A2B9B', label='3-pt Moving Avg')
+
+        x = mpl.dates.date2num(dates)
+        m, c_trend = np.polyfit(x, corr, 1)
+        xx = np.linspace(x.min(), x.max(), 100)
+        ax2.plot(mpl.dates.num2date(xx), m*xx + c_trend, '--', lw=1.3, c='#1A2B9B',
+                 label=f'Trend: {m*365.25:.2f} m/yr')
+        ax2.set_ylabel('Corrected Distance [m]')
+        ax2.set_title(f'Transect {tid} | Corrected Distance Trend')
+        ax2.legend(loc='upper left', fontsize=6)
+
+        for ax in (ax1, ax2):
+            for year in range(dates[0].year - 1, dates[-1].year + 1):
+                if Hemisphere == 'N':
+                    start = mdates.date2num(datetime(year, 11, 1))
+                    end = mdates.date2num(datetime(year + 1, 3, 1))
+                else:
+                    start = mdates.date2num(datetime(year, 5, 1))
+                    end = mdates.date2num(datetime(year, 9, 1))
+                ax.add_patch(mpatches.Rectangle((start, -2000), end-start, 4000,
+                                                fc=[0.3, 0.3, 0.3], alpha=0.2))
+            ax.set_xlim(dates[0] - timedelta(days=100), dates[-1] + timedelta(days=100))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 7)))
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
+        ax2.set_xlabel('Date')
+
+        # === Save original dual plots ===
+        plt.tight_layout()
+        fname = f'{sitename}_Transect{tid}_Raw_Corrected_Tide.png'
+        plt.savefig(os.path.join(outdir, fname), bbox_inches='tight')
+        print('Saved:', os.path.join(outdir, fname))
+
+        if ShowPlot:
+            plt.show()
+        else:
+            plt.close()
+
+        # === Tide Group Plots ===
+        if tide is not None:
+            tide = np.array(tide)
+            corr = np.array(corr)
+            tide_levels = ['High (≥5.5m)', 'Mid (3.2–5.5m)', 'Low (≤3.2m)']
+            masks = [tide >= 5.5, (tide > 3.2) & (tide < 5.5), tide <= 3.2]
+            colors = ['#D73027', '#FC8D59', '#4575B4']
+
+            for label, mask, color in zip(tide_levels, masks, colors):
+                t_dates = np.array(dates)[mask]
+                t_corr = corr[mask]
+
+                if len(t_corr) < 2:
+                    continue
+
+                fig, ax = plt.subplots(1, 1, figsize=(6.5, 3), dpi=300)
+                ax.grid(ls=':', lw=0.5, color=[0.7, 0.7, 0.7])
+                ax.plot(t_dates, t_corr, '-o', color=color, ms=4, label=label)
+
+                x = mpl.dates.date2num(t_dates)
+                m, c_trend = np.polyfit(x, t_corr, 1)
+                xx = np.linspace(x.min(), x.max(), 100)
+                ax.plot(mpl.dates.num2date(xx), m*xx + c_trend, '--', lw=1.3, color='navy',
+                        label=f'Trend: {m*365.25:.2f} m/yr')
+
+                ax.set_title(f'Transect {tid} | Corrected Distance – {label} Tide')
+                ax.set_ylabel('Corrected Distance [m]')
+                ax.legend(fontsize=7)
+
+                ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 7)))
+                ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
+                ax.set_xlim(dates[0] - timedelta(days=100), dates[-1] + timedelta(days=100))
+                ax.set_xlabel('Date')
+
+                for year in range(dates[0].year - 1, dates[-1].year + 1):
+                    if Hemisphere == 'N':
+                        start = mdates.date2num(datetime(year, 11, 1))
+                        end = mdates.date2num(datetime(year + 1, 3, 1))
+                    else:
+                        start = mdates.date2num(datetime(year, 5, 1))
+                        end = mdates.date2num(datetime(year, 9, 1))
+                    ax.add_patch(mpatches.Rectangle((start, -2000), end-start, 4000,
+                                                    fc=[0.3, 0.3, 0.3], alpha=0.2))
+
+                plt.tight_layout()
+                tide_fname = f'{sitename}_Transect{tid}_Corrected_{label.split()[0]}Tide.png'
+                plt.savefig(os.path.join(outdir, tide_fname), bbox_inches='tight')
+                print('Saved:', os.path.join(outdir, tide_fname))
+
+                if ShowPlot:
+                    plt.show()
+                else:
+                    plt.close()
+
+
+
+
 def VegTimeseriesNeon(sitename, TransectInterGDF, TransectIDs, Hemisphere='N', ShowPlot=True):
     """
     Plot timeseries of cross-shore veg edge change for selected transect(s) [NEON EFFECT]
@@ -480,8 +875,103 @@ def VegTimeseriesNeon(sitename, TransectInterGDF, TransectIDs, Hemisphere='N', S
     
     # reset to default style after neo style setting
     mpl.rcParams.update(mpl.rcParamsDefault)
+
+
     
-    
+def WaveEDAplots(
+    sitename,
+    TransectInterGDFWave,
+    TransectIDs,
+    Hemisphere='N',
+    ShowPlot=True,
+):
+    outdir = os.path.join(os.getcwd(), 'Data', sitename, 'plots')
+    os.makedirs(outdir, exist_ok=True)
+
+    if not ShowPlot:
+        plt.ioff()
+
+    if isinstance(TransectIDs, int):
+        TransectIDs = [TransectIDs]
+
+    for tid in TransectIDs:
+        try:
+            dates = [datetime.strptime(x, '%Y-%m-%d') for x in TransectInterGDFWave['WaveDates'].iloc[tid]]
+        except Exception:
+            dates = pd.to_datetime(TransectInterGDFWave['WaveDates'].iloc[tid])
+
+        Hs = TransectInterGDFWave['WaveHsFD'].iloc[tid]
+        Tp = TransectInterGDFWave['WaveTpFD'].iloc[tid]
+        Dir = TransectInterGDFWave['WaveDirFD'].iloc[tid]
+        Runup = TransectInterGDFWave['Runups'].iloc[tid]
+
+        if len(dates) == 0:
+            print(f'Transect {tid} is empty – skipped.')
+            continue
+            
+        # Check if all arrays have the same length
+        L = len(dates)
+        if not all(len(arr) == L for arr in [Hs, Tp, Dir, Runup]):
+            print(f'Transect {tid} skipped due to mismatched wave data lengths: '
+                  f'dates={len(dates)}, Hs={len(Hs)}, Tp={len(Tp)}, Dir={len(Dir)}, Runup={len(Runup)}')
+            continue
+
+
+        # Convert to arrays for indexing
+        dates = np.array(dates)
+        Hs = np.array(Hs)
+        Tp = np.array(Tp)
+        Dir = np.array(Dir)
+        Runup = np.array(Runup)
+
+        fig, axs = plt.subplots(4, 1, figsize=(8, 8), dpi=300, sharex=True)
+        plt.subplots_adjust(hspace=0.4)
+        plt.rcParams.update({'font.size': 7})
+
+        axs[0].plot(dates, Hs, '-o', c='royalblue', ms=3)
+        axs[0].set_ylabel('Wave Hs [m]')
+        axs[0].set_title(f'Transect {tid} | Wave Significant Height')
+
+        axs[1].plot(dates, Tp, '-o', c='darkorange', ms=3)
+        axs[1].set_ylabel('Wave Tp [s]')
+        axs[1].set_title('Wave Peak Period')
+
+        axs[2].plot(dates, Dir, '-o', c='green', ms=3)
+        axs[2].set_ylabel('Wave Dir [°]')
+        axs[2].set_title('Wave Direction')
+
+        axs[3].plot(dates, Runup, '-o', c='crimson', ms=3)
+        axs[3].set_ylabel('Runup [m]')
+        axs[3].set_title('Runup')
+
+        # Winter shading + date formatting
+        for ax in axs:
+            for year in range(dates[0].year - 1, dates[-1].year + 1):
+                if Hemisphere == 'N':
+                    start = mdates.date2num(datetime(year, 11, 1))
+                    end = mdates.date2num(datetime(year + 1, 3, 1))
+                else:
+                    start = mdates.date2num(datetime(year, 5, 1))
+                    end = mdates.date2num(datetime(year, 9, 1))
+                ax.add_patch(mpatches.Rectangle((start, -1000), end-start, 2000,
+                                                fc=[0.3, 0.3, 0.3], alpha=0.2))
+            ax.set_xlim(dates[0] - timedelta(days=100), dates[-1] + timedelta(days=100))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 7)))
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
+
+        axs[-1].set_xlabel('Date')
+
+        # Save
+        fname = f'{sitename}_Transect{tid}_WaveParams.png'
+        plt.savefig(os.path.join(outdir, fname), bbox_inches='tight')
+        print('Saved:', os.path.join(outdir, fname))
+
+        if ShowPlot:
+            plt.show()
+        else:
+            plt.close()
+
+
 def VegWaterTimeseries(sitename, TransectInterGDF, TransectIDs, Hemisphere='N', ShowPlot=True):
     """
     Plot timeseries of cross-shore veg edge and waterline change for selected transect(s).

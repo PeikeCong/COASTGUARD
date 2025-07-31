@@ -48,10 +48,10 @@ def GetHindcastWaveData(settings, output, lonmin, lonmax, latmin, latmax):
     WaveOutFile = settings['inputs']['sitename']+'_'+DateMin[:10]+'_'+DateMax[:10]+'_waves.nc'
     
     # Add 2-cell buffer to bounding box
-    latmin = latmin - 0.05
-    lonmin = lonmin - 0.05
-    latmax = latmax + 0.05
-    lonmax = lonmax + 0.05
+    latmin = latmin - 0.1
+    lonmin = lonmin - 0.1
+    latmax = latmax + 0.1
+    lonmax = lonmax + 0.1
     # if file already exists, just return filepath to existing file
     if os.path.isfile(os.path.join(WavePath,WaveOutFile)):
         print('Wave data file already exists.')

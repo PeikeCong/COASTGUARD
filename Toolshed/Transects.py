@@ -9,7 +9,7 @@ Martin Hurst, Freya Muir - University of Glasgow
 import os
 import glob
 import pickle
-
+import pytz
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import pyproj
 from pyproj import Proj
+from osgeo import gdal
+import rasterio as rio
 
 # other modules
 from sklearn.linear_model import LinearRegression
@@ -26,6 +28,7 @@ from pylab import ginput
 import rasterio as rio
 from rasterio.features import shapes
 from shapely.geometry import Point, Polygon, LineString, MultiLineString, MultiPoint
+from datetime import datetime, timedelta
 
 
 from Toolshed import Toolbox, Waves, Slope
@@ -485,7 +488,7 @@ def GetWaterIntersections(BasePath, TransectGDF, TransectInterGDF, WaterlineGDF,
 
     """
 
-    WaterlineGDF = WaterlineGDF.drop(columns=["tidetype"], errors="ignore"
+    WaterlineGDF = WaterlineGDF.drop(columns=["tidetype"], errors="ignore")
     print("performing intersections between transects and waterlines...")
     
     # checking for mismatched coordinate systems
@@ -575,12 +578,20 @@ def CalcBeachWidth(settings, TransectGDF, TransectInterGDFWater):
         ShoreLevels = []
         # for each water elevation obs in each transect
         for welev in TransectInterGDFWater['tideelev'].iloc[Tr]:
-            if welev >= TideSteps[0] and welev <= TideSteps[1]:
+            if len(TideSteps) < 4:
+                print(f"[WARNING] Skipping tide zone classification for Transect {Tr} — TideSteps too short: {TideSteps}")
+                ShoreLevels.append('unknown')
+                continue
+
+            if TideSteps[0] <= welev <= TideSteps[1]:
                 ShoreLevels.append('lower')
-            elif welev >= TideSteps[1] and welev <= TideSteps[2]:
+            elif TideSteps[1] < welev <= TideSteps[2]:
                 ShoreLevels.append('middle')
-            elif welev >= TideSteps[2] and welev <= TideSteps[3]:
+            elif TideSteps[2] < welev <= TideSteps[3]:
                 ShoreLevels.append('upper')
+            else:
+                ShoreLevels.append('unknown')
+
 
         TransectInterGDFWater['tidezone'].iloc[Tr] = ShoreLevels
         
@@ -750,23 +761,50 @@ def WLCorrections(settings, output, TransectInterGDFWater, TransectInterGDFWave=
     
     print('Correcting waterline positions...')
     # Parse satellite acquisition datetime and create lookup dictionary
-    dates_sat = [
-        datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M:%S.%f') 
-        for date, time in zip(output['dates'], output['times'])
-    ]
+    dates_sat = []
+    
+    for date, time in zip(output["dates"], output["times"]):
+        time = str(time).strip() if time else ""
+        
+        # Catch invalid or missing time strings
+        if "UTC" in time or not time or len(time.split(":")) < 2:
+            time = "00:00:00.000"
+    
+        try:
+            dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError as e:
+            try:
+                dt = datetime.strptime(date, "%Y-%m-%d")
+                dt = dt.replace(hour=0, minute=0)
+            except Exception as e2:
+                print(f"Skipping invalid datetime: {date} {time} — {e2}")
+                continue
+    
+        dates_sat.append(dt)
+    
+    dates_sat_cleaned = [dt for dt in dates_sat if isinstance(dt, datetime)]
+    
+    # Extra sanity check
+    # FINAL sanity check — print all dates and types
+    print("\n=== FINAL dates passed to GetWaterElevs ===")
+    for i, d in enumerate(dates_sat_cleaned):
+        print(f"{i}: {d} ({type(d)})")
+
     # Generate daily timesteps between first and last output dates
-    hourlytides, dailymeantides, dailymaxtides = Toolbox.GetWaterElevs(settings, dates_sat, Daily=True)
+    hourlytides, dailymeantides, dailymaxtides = Toolbox.GetWaterElevs(settings, dates_sat_cleaned, Daily=True)
     tide_dict = dict(zip(dates_sat, hourlytides))
     
     # Clip tide data down to output dates
-    startdt = datetime.strptime(output['dates'][0]+' 00:00:00', '%Y-%m-%d %H:%M:%S')
-    enddt = datetime.strptime(output['dates'][-1]+' 00:00:00', '%Y-%m-%d %H:%M:%S')+timedelta(days=1)
+    startdt = datetime.strptime(output['dates'][0]+' 00:00:00', '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
+    enddt = datetime.strptime(output['dates'][-1]+' 00:00:00', '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC) + timedelta(days=1)
+
     
     dailymeantides = dailymeantides[(dailymeantides.index >= startdt) 
                                     & (dailymeantides.index < enddt)]
     dailymaxtides = dailymaxtides[(dailymaxtides.index >= startdt) 
                                     & (dailymaxtides.index < enddt)]
-    
+    print(dailymeantides.index.tz)
+
     # If wave data is provided, add runups to tidal correction
     if TransectInterGDFWave is not None:
         print('using runup as well as tides...')
@@ -815,8 +853,18 @@ def WLCorrections(settings, output, TransectInterGDFWater, TransectInterGDFWave=
             if len(dates_sat_tr) < 10:
                 BeachSlope = 0.1
             else:
-                # tides needs to be used bc if any nan, then fine_tide_peak fails
-                BeachSlope = Slope.CoastSatSlope(dates_sat_tr, tides_sat_tr, cross_distances)
+                # Use DefineSlopeSettings to include required keys like 'n_days'
+                slope_settings = Slope.DefineSlopeSettings(cross_distances)
+                slope_settings["transect_id"] = Tr
+                slope_settings["out_folder"] = os.path.join(settings["inputs"]["filepath"], "tide_energy_img")
+        
+                BeachSlope = Slope.CoastSatSlope(
+                    dates_sat_tr,
+                    tides_sat_tr,
+                    cross_distances,
+                    settings_slope=slope_settings
+                )
+
     
         # Correct each cross-shore distance for tidal elevation
         CorrectedDistsTr = [
@@ -1292,7 +1340,6 @@ def TZIntersect(settings, TransectInterGDF, VeglinesGDF, BasePath):
         
     return TransectInterGDF    
 
-
 def SlopeIntersect(settings, TransectInterGDF, VeglinesGDF, BasePath, DTMfile=None):
     """
     Intersections between coastal indicator lines and topographic slope raster.
@@ -1306,8 +1353,8 @@ def SlopeIntersect(settings, TransectInterGDF, VeglinesGDF, BasePath, DTMfile=No
         GeoDataFrame of transects with veg edge intersection info assigned.
     VeglinesGDF : GeoDataFrame
         GoeDataFrame representing shapefile of vegetation edge lines.
-     BasePath : str
-         Filepath to where veg edge and transect shapefiles sit.
+    BasePath : str
+        Filepath to where veg edge and transect shapefiles sit.
     DTMfile : str, optional
         Filepath to slope raster of choice. The default is None.
 
@@ -1315,103 +1362,102 @@ def SlopeIntersect(settings, TransectInterGDF, VeglinesGDF, BasePath, DTMfile=No
     -------
     TransectInterGDF : GeoDataFrame
         Updated GeoDataFrame with new info attached to each transect.
-
     """
     
     if DTMfile is None:
         print('No DTM file provided.')
         return TransectInterGDF
+
+    print('Intersecting transects with slope ... ')
     
-    else:
-        print('Intersecting transects with slope ... ')
-        
-        src = rio.open(DTMfile)
-        
-        # DTM should be in same CRS as Transects; reproject using gdal if not  
-        if src.crs != TransectInterGDF.crs:
-            dstDTMfile = os.path.join(os.path.splitext(DTMfile)[0] + '_reproj.tif')
-            command = 'gdalwarp ' + DTMfile + ' ' + dstDTMfile + ' -t_srs ' + str(TransectInterGDF.crs)
-            os.system(command)
-            # read back in reprojected .tif
-            src = rio.open(dstDTMfile)
+    src = rio.open(DTMfile)
 
-        MaxSlope = []
-        MeanSlope = []
+    # DTM should be in same CRS as Transects; reproject using gdal if not  
+    if src.crs != TransectInterGDF.crs:
+        dstDTMfile = os.path.splitext(DTMfile)[0] + '_reproj.tif'
         
-        for Tr in range(len(TransectInterGDF)):
-            print('\r %0.3f %% transects processed' % ( (Tr/len(TransectInterGDF))*100 ), end='')
+        print(f"[INFO] Reprojecting DTM with gdal.Warp to {TransectInterGDF.crs.to_string()}")
+        
+        reprojected = gdal.Warp(
+            dstDTMfile,
+            DTMfile,
+            dstSRS=TransectInterGDF.crs.to_string(),
+            format='GTiff'
+        )
+    
+        if reprojected is None or not os.path.exists(dstDTMfile):
+            raise RuntimeError(f"gdal.Warp failed or file not created: {dstDTMfile}")
+        
+        src = rio.open(dstDTMfile)
 
-            # Only want 20 m either side of veg intersect
-            InterPnts = TransectInterGDF['interpnt'].iloc[Tr]
-            # If there are no line intersections on that transect
-            if InterPnts == []:
-                MaxSlope.append(np.nan)
-                MeanSlope.append(np.nan)
+    MaxSlope = []
+    MeanSlope = []
+
+    for Tr in range(len(TransectInterGDF)):
+        print('\r %0.3f %% transects processed' % ((Tr / len(TransectInterGDF)) * 100), end='')
+
+        InterPnts = TransectInterGDF['interpnt'].iloc[Tr]
+        if InterPnts == []:
+            MaxSlope.append(np.nan)
+            MeanSlope.append(np.nan)
+        else:
+            InterPnt = Point(np.mean([Pnt.x for Pnt in InterPnts]), np.mean([Pnt.y for Pnt in InterPnts]))
+            intx, Trx = InterPnt.coords.xy[0][0], TransectInterGDF.iloc[Tr].geometry.coords.xy[0][0]
+            inty, Try = InterPnt.coords.xy[1][0], TransectInterGDF.iloc[Tr].geometry.coords.xy[1][0]
+
+            if np.isnan(TransectInterGDF['TZwidthMn'].iloc[Tr]):
+                dist = 5
             else:
-                # Take average vegline intersection point of each transect to swath points along
-                InterPnt = Point(np.mean([Pnt.x for Pnt in InterPnts]), np.mean([Pnt.y for Pnt in InterPnts]))
-                
-                # Extend Tr in either direction along transect from intersection point
-                intx, Trx, inty, Try = InterPnt.coords.xy[0][0], TransectInterGDF.iloc[Tr].geometry.coords.xy[0][0], InterPnt.coords.xy[1][0],TransectInterGDF.iloc[Tr].geometry.coords.xy[1][0]
-                # Distance decided by cross-shore width of TZ plus extra 5m buffer
-                if np.isnan(TransectInterGDF['TZwidthMn'].iloc[Tr]) == True:
-                    dist = 5 # buffer transects with no TZ by 5m
-                else:
-                    dist = round(TransectInterGDF['TZwidthMn'].iloc[Tr]) + 5
-                # calculate vector
-                v = (Trx-intx, Try-inty)
-                v_ = np.sqrt((Trx-intx)**2 + (Try-inty)**2)
-                # calculate normalised vector
-                vnorm = v / v_
-                # use norm vector to extend 
-                x_1, y_1 = (intx, inty) - (dist*vnorm)
-                x_2, y_2 = (intx, inty) + (dist*vnorm)
-                
-                # New linestring from extended points
-                NewTr = gpd.GeoDataFrame(index=[0], crs=TransectInterGDF.crs, geometry=[LineString([(x_1,y_1),(x_2,y_2)])])
-                NewTrGeom = NewTr.geometry
-                # Generate regularly spaced points along each transect
-                distance_delta = 1
-                distances = np.arange(0, float(NewTrGeom.length), distance_delta)
-                points = [NewTrGeom.interpolate(distance) for distance in distances]
-                points = [(float(point.x), float(point.y)) for point in points]
-                
-                # Extract slope values at each point along Tr
-                MaxSlopeTr = np.max([val[0] for val in src.sample(points)])
-                MeanSlopeTr = np.mean([val[0] for val in src.sample(points)])
-                if MaxSlopeTr == -9999: # nodata value
-                    MaxSlopeTr = np.nan
-                    MeanSlopeTr = np.nan
-                MaxSlope.append(MaxSlopeTr)
-                MeanSlope.append(MeanSlopeTr)
-        
-        TransectInterGDF['SlopeMax'] = MaxSlope
-        TransectInterGDF['SlopeMean'] = MeanSlope
-        
-        
-        TransectInterShp = TransectInterGDF.copy()
-        
-        # reformat fields with lists to strings
-        KeyName = list(TransectInterShp.select_dtypes(include='object').columns)
-        for Key in KeyName:
-            # round any floating points numbers before export
-            realInd = next(i for i, j in enumerate(TransectInterShp[Key]) if j)
-                
-            if type(TransectInterShp[Key][realInd]) == list: # for lists of intersected values
-                if type(TransectInterShp[Key][realInd][0]) == np.float64:  
+                dist = round(TransectInterGDF['TZwidthMn'].iloc[Tr]) + 5
+
+            v = (Trx - intx, Try - inty)
+            v_ = np.sqrt(v[0]**2 + v[1]**2)
+            vnorm = np.array(v) / v_
+
+            x_1, y_1 = (intx, inty) - (dist * vnorm)
+            x_2, y_2 = (intx, inty) + (dist * vnorm)
+
+            NewTr = gpd.GeoDataFrame(index=[0], crs=TransectInterGDF.crs, geometry=[LineString([(x_1, y_1), (x_2, y_2)])])
+            NewTrGeom = NewTr.geometry.iloc[0]
+
+            distance_delta = 1
+            distances = np.arange(0, float(NewTrGeom.length), distance_delta)
+            points = [NewTrGeom.interpolate(distance) for distance in distances]
+            points = [(float(point.x), float(point.y)) for point in points]
+
+            MaxSlopeTr = np.max([val[0] for val in src.sample(points)])
+            MeanSlopeTr = np.mean([val[0] for val in src.sample(points)])
+
+            if MaxSlopeTr == -9999:
+                MaxSlopeTr = np.nan
+                MeanSlopeTr = np.nan
+
+            MaxSlope.append(MaxSlopeTr)
+            MeanSlope.append(MeanSlopeTr)
+
+    TransectInterGDF['SlopeMax'] = MaxSlope
+    TransectInterGDF['SlopeMean'] = MeanSlope
+
+    TransectInterShp = TransectInterGDF.copy()
+
+    # reformat fields with lists to strings
+    KeyName = list(TransectInterShp.select_dtypes(include='object').columns)
+    for Key in KeyName:
+        realInd = next((i for i, j in enumerate(TransectInterShp[Key]) if j), None)
+        if realInd is not None:
+            if isinstance(TransectInterShp[Key][realInd], list):
+                if isinstance(TransectInterShp[Key][realInd][0], np.float64):
                     for Tr in range(len(TransectInterShp[Key])):
-                        TransectInterShp[Key][Tr] = [round(i,2) for i in TransectInterShp[Key][Tr]]
-            else: # for singular values
-                if type(TransectInterShp[Key][realInd]) == np.float64: 
-                    for Tr in range(len(TransectInterShp[Key])):
-                        TransectInterShp[Key][Tr] = [round(i,2) for i in TransectInterShp[Key][Tr]]
-            
-            TransectInterShp[Key] = TransectInterShp[Key].astype(str)
-                        
-        # Save as shapefile of intersected transects
-        TransectInterShp.to_file(os.path.join(BasePath,settings['inputs']['sitename']+'_Transects_Intersected_Slope.shp'))
-            
-        return TransectInterGDF    
+                        TransectInterShp[Key][Tr] = [round(i, 2) for i in TransectInterShp[Key][Tr]]
+            elif isinstance(TransectInterShp[Key][realInd], np.float64):
+                for Tr in range(len(TransectInterShp[Key])):
+                    TransectInterShp[Key][Tr] = [round(TransectInterShp[Key][Tr], 2)]
+
+        TransectInterShp[Key] = TransectInterShp[Key].astype(str)
+
+    TransectInterShp.to_file(os.path.join(BasePath, settings['inputs']['sitename'] + '_Transects_Intersected_Slope.shp'))
+
+    return TransectInterGDF
             
 
 

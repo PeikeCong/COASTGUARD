@@ -14,6 +14,7 @@ import pickle
 import math
 from datetime import datetime, timedelta
 from IPython.display import clear_output
+from pytz import UTC  # at the top of Toolbox.py if not already
 
 # other modules
 from osgeo import gdal, osr
@@ -39,6 +40,9 @@ import geemap
 
 import pyfes
 import netCDF4
+
+import folium
+
 
 from Toolshed import Image_Processing
 
@@ -1700,6 +1704,49 @@ def spaced_vertices(referenceLine):
     
     return newreferenceLine
 
+# NEW - read AOI from geojson
+import geopandas as gpd
+import os
+
+import geopandas as gpd
+import os
+
+def AOI_from_file(sitename):
+    """
+    Reads AOI polygon geometry from ./Data/ROIs/<sitename>.geojson.
+
+    Parameters
+    ----------
+    sitename : str
+
+    Returns
+    -------
+    polygon : list of lists
+        [[ [lon, lat], [lon, lat], ... ]] list format for compatibility
+    point : ee.Geometry.Point
+        First coordinate of the polygon (for Earth Engine if needed)
+    gdf : GeoDataFrame
+        Full AOI as GeoDataFrame
+    """
+    geojson_path = f"./Data/ROIs/{sitename}.geojson"
+    if not os.path.exists(geojson_path):
+        raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
+
+    # Read and reproject to WGS84
+    gdf = gpd.read_file(geojson_path)
+    gdf = gdf.to_crs(epsg=4326)
+
+    # Extract coordinates from the first geometry
+    geom = gdf.geometry.values[0]
+    coords = list(geom.exterior.coords) if geom.geom_type == "Polygon" else list(geom.geoms[0].exterior.coords)
+    polygon = [[list(pt) for pt in coords]]  # convert tuples to lists, then wrap
+
+    # Optional: point for consistency with Earth Engine
+    from ee import Geometry
+    point = Geometry.Point(polygon[0][0])
+
+    return polygon, point, gdf
+
 
 def AOI(lonmin, lonmax, latmin, latmax, sitename):
     '''
@@ -2470,7 +2517,7 @@ def ComputeTideLocal(settings, tidepath, tideoutpath, daterange, tidelatlon):
     # Fixed path to your local tide data
     local_csv = os.path.join("tide_data", "tide_data_utc.csv")
     df = pd.read_csv(local_csv)
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"], utc=True)  # ensures tz-aware (UTC)
     # Save output
     df.to_csv(tideoutpath, index=False)
     print(f"Tide data saved to {tideoutpath}")
@@ -2598,7 +2645,7 @@ def ChangeYAMLPaths(configfile, tidepath):
     ----------
     configfile : str
         Path to configuration file (.yaml) for loading FES tidal constituents.
-    tidepath : str
+    tidepath : stretWaterElev
         Global filepath to tidal data on user's machine.
     """    
     
@@ -2645,8 +2692,10 @@ def GetWaterElevs(settings, Dates_Sat, Daily=False):
     Tide_Data.set_index('date', inplace=True)
 
     Tides_Sat = []
-
+    
     # For each satellite timestamp, find the closest tide record
+    Dates_Sat = [dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC) for dt in Dates_Sat]
+
     for ts in Dates_Sat:
         try:
             idx = (np.abs(Tide_Data.index - ts)).argmin()
@@ -2685,7 +2734,7 @@ def BeachTideLoc(settings, TideSeries=None):
 
     '''
     
-    TideSteps = [0.0, 3.1, 5.3]
+    TideSteps = [0.0, 2.0, 4.0, 6.0]
     return TideSteps
 
 
@@ -2940,115 +2989,143 @@ def Moments(Arr):
 def InterpolateRaster(raster, method='nearest'):
     """
     Interpolate over empty values in a raster.
-    FM July 2024
+    Handles edge cases like fully masked or 1x1 rasters.
+    FM July 2024 (modified)
 
     Parameters
     ----------
-    raster : array
-        2D array of raster values.
+    raster : masked array
+        2D masked array of raster values.
     method : str, optional
-        Interpolation method to be used ['linear','nearest','cubic']. Nearest
-        is the only method to fill all cells in a raster.
+        Interpolation method ['linear', 'nearest', 'cubic'].
 
     Returns
     -------
     interp_raster : array
-        Interpolated raster.
-
+        Interpolated raster (unmasked array).
     """
+    # --- Skip interpolation for trivial cases ---
+    if raster.shape[-2:] == (1, 1):
+        return raster.data  # nothing to interpolate
+
+    if not np.ma.isMaskedArray(raster):
+        return raster  # no masked data
+
     mask = raster.mask
+    if np.all(mask):
+        return np.full_like(raster.data, np.nan)  # all missing
+
+    if not np.any(mask):
+        return raster.data  # all good, no missing
+
+    # --- Interpolate missing values ---
     validcoords = np.array(np.nonzero(~mask)).T
     invalidcoords = np.array(np.nonzero(mask)).T
-    
     validvals = raster[~mask]
-    interp_vals = interpolate.griddata(validcoords, validvals,
-                                      invalidcoords, method=method)
+
+    try:
+        interp_vals = interpolate.griddata(validcoords, validvals, invalidcoords, method=method)
+    except Exception as e:
+        print("Interpolation failed:", e)
+        return raster.data  # fallback to original data
+
     interp_raster = raster.data.copy()
-    interp_raster[mask] = interp_vals
+    
+    # Only assign if shape matches
+    if interp_vals is not None and len(interp_vals) == len(invalidcoords):
+        interp_raster[mask] = interp_vals
+    else:
+        print("Interpolation shape mismatch – skipping fill.")
     
     return interp_raster
+
+from scipy import interpolate
+import numpy as np
 
 def InterpolateCircRaster(raster, method='nearest', nodata_value=-32767):
     '''
     Interpolate over empty values in a raster of angles in degrees between 0 and 360 (e.g. wave directions).
-    FM July 2024
+    Safe version that handles edge cases like 1x1 rasters or too few valid points.
 
     Parameters
     ----------
-    raster : array
+    raster : array or masked array
         2D array of raster values.
     method : str, optional
-        Interpolation method to be used ['linear','nearest','cubic']. Nearest
-        is the only method to fill all cells in a raster.
+        Interpolation method to be used ['linear','nearest','cubic'].
+    nodata_value : float or int, optional
+        Value to treat as missing.
 
     Returns
     -------
     interpolated_degrees : array
         Interpolated raster of degrees.
-
     '''
 
+    # --- Pre-check for invalid conditions ---
+    if raster.shape[-2:] == (1, 1):
+        return raster.data if hasattr(raster, 'data') else raster  # skip 1x1
 
-    # Convert nodata values (-32767) to NaN for interpolation
-    raster_data = np.where(raster.data == nodata_value, np.nan, raster.data)
+    # Convert to ndarray and handle nodata
+    raster_data = np.where(raster == nodata_value, np.nan, raster)
 
-    # Convert degrees to radians and then to complex numbers
+    # If all missing or not enough valid data, skip interpolation
+    if np.isnan(raster_data).all() or np.count_nonzero(~np.isnan(raster_data)) < 4:
+        print("⚠️ Not enough valid points to interpolate circular raster.")
+        return raster_data
+
+    # Convert degrees to complex values on the unit circle
     radians = np.deg2rad(raster_data)
     complex_numbers = np.exp(1j * radians)
-
-    # Extract real and imaginary parts
     real_part = np.real(complex_numbers)
     imag_part = np.imag(complex_numbers)
 
-    # Get indices for all raster points
+    # Build index grid
     x, y = np.indices(raster_data.shape)
-
-    # Identify valid points (those that are not NaN)
     valid_mask = ~np.isnan(raster_data)
+    masked_mask = np.isnan(raster_data)
+
     valid_points = np.array((x[valid_mask], y[valid_mask])).T
+    masked_points = np.array((x[masked_mask], y[masked_mask])).T
     valid_real = real_part[valid_mask]
     valid_imag = imag_part[valid_mask]
 
-    # Identify points that need interpolation (those that are NaN)
-    masked_mask = np.isnan(raster_data)
-    masked_points = np.array((x[masked_mask], y[masked_mask])).T
+    # Interpolate real and imaginary parts (linear)
+    try:
+        interp_real_linear = interpolate.griddata(valid_points, valid_real, masked_points, method='linear')
+        interp_imag_linear = interpolate.griddata(valid_points, valid_imag, masked_points, method='linear')
+    except Exception as e:
+        print("⚠️ Interpolation failed:", e)
+        return raster_data
 
-    # Perform linear interpolation first
-    interp_real_linear = interpolate.griddata(valid_points, valid_real, masked_points, method='linear')
-    interp_imag_linear = interpolate.griddata(valid_points, valid_imag, masked_points, method='linear')
-
-    # Create a copy of the raster to store linear interpolation results
+    # Fill in linear interpolated values
     interpolated_real = real_part.copy()
     interpolated_imag = imag_part.copy()
-    interpolated_real[masked_mask] = interp_real_linear
-    interpolated_imag[masked_mask] = interp_imag_linear
+    if interp_real_linear is not None:
+        interpolated_real[masked_mask] = interp_real_linear
+        interpolated_imag[masked_mask] = interp_imag_linear
 
-    # Reconstruct complex numbers from linear interpolation results
+    # Reconstruct angle
     interpolated_complex = interpolated_real + 1j * interpolated_imag
     interpolated_radians = np.angle(interpolated_complex)
     interpolated_degrees = np.rad2deg(interpolated_radians)
     interpolated_degrees = np.mod(interpolated_degrees, 360)
 
-    # Identify any remaining NaNs after linear interpolation
+    # Nearest-neighbor fallback for any remaining NaNs
     remaining_mask = np.isnan(interpolated_degrees)
     if np.any(remaining_mask):
-        # Perform nearest-neighbor interpolation on remaining NaNs
         masked_points_remaining = np.array((x[remaining_mask], y[remaining_mask])).T
         interp_real_nearest = interpolate.griddata(valid_points, valid_real, masked_points_remaining, method='nearest')
         interp_imag_nearest = interpolate.griddata(valid_points, valid_imag, masked_points_remaining, method='nearest')
 
-        # Fill remaining NaNs with nearest-neighbor results
-        # Ensure the interpolation result has the correct shape before assignment
         interpolated_real[remaining_mask] = np.where(np.isnan(interp_real_nearest), interpolated_real[remaining_mask], interp_real_nearest)
         interpolated_imag[remaining_mask] = np.where(np.isnan(interp_imag_nearest), interpolated_imag[remaining_mask], interp_imag_nearest)
 
-        # Reconstruct complex numbers for remaining values
         interpolated_complex = interpolated_real + 1j * interpolated_imag
         interpolated_radians = np.angle(interpolated_complex)
         interpolated_degrees = np.rad2deg(interpolated_radians)
         interpolated_degrees = np.mod(interpolated_degrees, 360)
 
-    # Return the fully interpolated raster (with no NaNs)
     return interpolated_degrees
 
 
