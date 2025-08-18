@@ -211,42 +211,28 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
-def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_k, Hemisphere='N', ShowPlot=True):
-    tide_high_thresh = 5.5
-    tide_low_thresh = 3.2
+import numpy as np
+import pandas as pd
+import os
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
+def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_k, Hemisphere='N', ShowPlot=True):
     transect_features = []
 
     for i in TransectIDs:
         try:
             dists = np.array(TransectInterGDFWater['wldists'].iloc[i], dtype=float)
-            tides = np.array(TransectInterGDFWater['tideelev'].iloc[i], dtype=float)
-
             dists = np.nan_to_num(dists, nan=0.0)
-            tides = np.nan_to_num(tides, nan=0.0)
 
-            min_len = min(len(dists), len(tides))
-            if min_len == 0:
+            if len(dists) == 0:
                 dists = np.zeros(1)
-                tides = np.zeros(1)
-            else:
-                dists = dists[:min_len]
-                tides = tides[:min_len]
-
-            low = dists[tides < tide_low_thresh]
-            mid = dists[(tides >= tide_low_thresh) & (tides <= tide_high_thresh)]
-            high = dists[tides > tide_high_thresh]
 
             transect_features.append({
                 'TransectID': i,
                 'mean_all': np.mean(dists),
                 'std_all': np.std(dists),
-                'mean_low': np.mean(low) if len(low) else 0.0,
-                'std_low': np.std(low) if len(low) else 0.0,
-                'mean_mid': np.mean(mid) if len(mid) else 0.0,
-                'std_mid': np.std(mid) if len(mid) else 0.0,
-                'mean_high': np.mean(high) if len(high) else 0.0,
-                'std_high': np.std(high) if len(high) else 0.0,
             })
         except Exception as e:
             print(f"Error in transect {i}: {e}")
@@ -257,7 +243,8 @@ def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_
         print("No valid transect data to cluster.")
         return
 
-    features = df_feat.drop(columns=['TransectID'])
+    # Only use mean_all and std_all
+    features = df_feat[['mean_all', 'std_all']]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(features)
 
@@ -282,9 +269,8 @@ def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_
     df_feat['Cluster'] = km.fit_predict(X_scaled)
 
     # === Plot histograms and save ===
-    plot_cols = ['mean_all', 'std_all', 'mean_low', 'std_low', 'mean_mid', 'std_mid', 'mean_high', 'std_high']
-    fig, axs = plt.subplots(4, 2, figsize=(10, 10), dpi=150)
-    axs = axs.flatten()
+    plot_cols = ['mean_all', 'std_all']
+    fig, axs = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 
     for i, col in enumerate(plot_cols):
         for cluster_id in range(optimal_k):
@@ -300,7 +286,7 @@ def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_
     # Save plot to file
     outfilepath = os.path.join(os.getcwd(), 'Data', sitename, 'plots')
     os.makedirs(outfilepath, exist_ok=True)
-    img_outfile = os.path.join(outfilepath, f"{optimal_k}_cluster_distribution.png")
+    img_outfile = os.path.join(outfilepath, f"{optimal_k}_cluster_distribution_filtered.png")
     fig.savefig(img_outfile)
     print(f"Cluster distribution plot saved to: {img_outfile}")
 
@@ -315,7 +301,6 @@ def cluster_transects_eda(sitename, TransectInterGDFWater, TransectIDs, optimal_
         print(f"Cluster {cid}: Transects {members}")
 
     return df_feat
-
 
 
 def plot_transects_clusters_folium(TransectInterGDFWater, clustered_df, sitename, outfile='clustered_transects_map.html'):
@@ -408,7 +393,224 @@ def plot_transects_clusters_folium(TransectInterGDFWater, clustered_df, sitename
     return m
 
 
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import ttest_ind
 
+def ttest_transects_tide_diff(TransectInterGDFWater, TransectIDs, high_thresh=5.5, low_thresh=3.0, ShowPlot=True):
+    """
+    For each transect, perform a t-test comparing distances at high tide and low tide.
+    Includes effect size (difference, ratio) and basic EDA plots.
+    
+    Parameters:
+    -----------
+    TransectInterGDFWater : GeoDataFrame
+        Contains 'wldists' and 'tideelev' columns where each cell is a list per transect.
+    TransectIDs : list of int
+        Transect indices to check.
+    high_thresh : float
+        Threshold above which is considered high tide.
+    low_thresh : float
+        Threshold below which is considered low tide.
+    ShowPlot : bool
+        Whether to show EDA plots.
+    
+    Returns:
+    --------
+    pd.DataFrame with TransectID, mean_high, mean_low, p_value, significant (bool),
+    diff_mean, ratio_high_low
+    """
+    results = []
+
+    for i in TransectIDs:
+        try:
+            dists = np.array(TransectInterGDFWater['wldists'].iloc[i], dtype=float)
+            tides = np.array(TransectInterGDFWater['tideelev'].iloc[i], dtype=float)
+
+            # Fill NaNs with 0
+            dists = np.nan_to_num(dists, nan=0.0)
+            tides = np.nan_to_num(tides, nan=0.0)
+
+            # Align lengths
+            min_len = min(len(dists), len(tides))
+            dists = dists[:min_len]
+            tides = tides[:min_len]
+
+            # High and low tide groups
+            high_dist = dists[tides > high_thresh]
+            low_dist = dists[tides < low_thresh]
+
+            # Means
+            mean_high = np.mean(high_dist) if len(high_dist) > 0 else np.nan
+            mean_low = np.mean(low_dist) if len(low_dist) > 0 else np.nan
+
+            # T-test
+            if len(high_dist) >= 2 and len(low_dist) >= 2:
+                stat, p = ttest_ind(high_dist, low_dist, equal_var=False)
+            else:
+                p = np.nan
+
+            # Effect size
+            diff_mean = mean_high - mean_low if not np.isnan(mean_high) and not np.isnan(mean_low) else np.nan
+            ratio = mean_high / mean_low if mean_low and not np.isnan(mean_low) and mean_low != 0 else np.nan
+
+            results.append({
+                'TransectID': i,
+                'mean_high': mean_high,
+                'mean_low': mean_low,
+                'p_value': p,
+                'significant': p < 0.05 if not np.isnan(p) else False,
+                'diff_mean': diff_mean,
+                'ratio_high_low': ratio
+            })
+
+        except Exception as e:
+            print(f"Error in transect {i}: {e}")
+            results.append({
+                'TransectID': i,
+                'mean_high': np.nan,
+                'mean_low': np.nan,
+                'p_value': np.nan,
+                'significant': False,
+                'diff_mean': np.nan,
+                'ratio_high_low': np.nan
+            })
+
+    df_result = pd.DataFrame(results)
+
+    # === Plot section ===
+    if ShowPlot and not df_result.empty:
+        fig, axs = plt.subplots(1, 3, figsize=(16, 4), dpi=120)
+
+        # 1. Histogram of effect size
+        axs[0].hist(df_result['diff_mean'].dropna(), bins=20, color='skyblue', edgecolor='black')
+        axs[0].set_title('Effect Size: Mean Distance Difference (high - low)')
+        axs[0].set_xlabel('Distance Difference (m)')
+        axs[0].set_ylabel('Count')
+        axs[0].grid(True, linestyle=':')
+
+        # 2. Scatter of mean_low vs. mean_high
+        axs[1].scatter(df_result['mean_low'], df_result['mean_high'],
+                       c=df_result['significant'].map({True: 'red', False: 'green'}),
+                       label=None, alpha=0.6)
+        axs[1].plot([0, np.nanmax(df_result[['mean_low', 'mean_high']].values)],
+                    [0, np.nanmax(df_result[['mean_low', 'mean_high']].values)],
+                    ls='--', color='gray')
+        axs[1].set_title('Mean Low vs. Mean High Distance')
+        axs[1].set_xlabel('Mean Distance (Low Tide)')
+        axs[1].set_ylabel('Mean Distance (High Tide)')
+        axs[1].grid(True, linestyle=':')
+
+        # 3. Volcano-style plot (effect size vs. significance)
+        df_plot = df_result.copy()
+        df_plot['-log10(p_value)'] = -np.log10(df_plot['p_value'].replace(0, 1e-10))
+        axs[2].scatter(df_plot['diff_mean'], df_plot['-log10(p_value)'],
+                       c=df_result['significant'].map({True: 'red', False: 'gray'}), alpha=0.6)
+        axs[2].axhline(-np.log10(0.05), color='black', linestyle='--', label='p=0.05')
+        axs[2].set_title('Volcano Plot')
+        axs[2].set_xlabel('Mean Distance Difference (high - low)')
+        axs[2].set_ylabel('-log10(p-value)')
+        axs[2].grid(True, linestyle=':')
+
+        plt.tight_layout()
+        plt.show()
+
+    return df_result
+
+
+import os
+import folium
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+from folium.features import GeoJsonTooltip
+from branca.colormap import StepColormap
+from shapely.geometry import mapping
+
+def plot_transects_significance_folium(TransectInterGDFWater, ttest_df, sitename, outfile='significance_transects_map.html'):
+    """
+    Plots transects colored by t-test significance on a Folium map and exports to shapefile.
+
+    Parameters:
+    -----------
+    TransectInterGDFWater : GeoDataFrame
+        Original GeoDataFrame with 'geometry' and index matching TransectID.
+    ttest_df : DataFrame
+        Contains columns ['TransectID', 'p_value', 'significant']
+    sitename : str
+        Name of site for folder structure.
+    outfile : str
+        HTML file to save.
+    """
+
+    # Merge geometry into significance dataframe
+    merged_gdf = ttest_df.merge(
+        TransectInterGDFWater[['geometry']],
+        left_on='TransectID',
+        right_index=True
+    )
+    merged_gdf = gpd.GeoDataFrame(merged_gdf, geometry='geometry', crs=TransectInterGDFWater.crs)
+
+    # Reproject for web map
+    if merged_gdf.crs and not merged_gdf.crs.is_geographic:
+        merged_gdf = merged_gdf.to_crs(epsg=4326)
+
+    # Colors
+    color_dict = {True: '#d73027', False: '#1a9850'}  # red for significant, green for stable
+
+    # Map
+    center = merged_gdf.unary_union.centroid
+    m = folium.Map(location=[center.y, center.x], zoom_start=12, tiles='CartoDB Positron')
+
+    for _, row in merged_gdf.iterrows():
+        sig = row['significant']
+        geojson_feature = {
+            "type": "Feature",
+            "geometry": mapping(row["geometry"]),
+            "properties": {
+                "TransectID": int(row["TransectID"]),
+                "Significant": str(sig),
+                "p_value": f"{row['p_value']:.3f}" if not np.isnan(row['p_value']) else "NaN"
+            }
+        }
+
+        folium.GeoJson(
+            geojson_feature,
+            style_function=lambda x, col=color_dict[sig]: {
+                'color': col,
+                'weight': 2,
+                'opacity': 0.8
+            },
+            tooltip=GeoJsonTooltip(
+                fields=["TransectID", "Significant", "p_value"],
+                aliases=["Transect", "Significant", "p-value"],
+                sticky=True
+            )
+        ).add_to(m)
+
+    # Legend
+    colormap = StepColormap(
+        colors=['#1a9850', '#d73027'],
+        index=[0, 1, 2],
+        vmin=0,
+        vmax=1,
+        caption='T-test Significance (0=Stable, 1=Significant)'
+    )
+    colormap.add_to(m)
+
+    # Save HTML
+    m.save(outfile)
+    print(f"Significance map saved to: {outfile}")
+
+    # Save Shapefile
+    outfilepath = os.path.join(os.getcwd(), 'Data', sitename, 'plots')
+    os.makedirs(outfilepath, exist_ok=True)
+    shp_outfile = os.path.join(outfilepath, f"significant_transects.shp")
+    merged_gdf.to_file(shp_outfile)
+    print(f"Shapefile saved to: {shp_outfile}")
+
+    return m
 
 
 

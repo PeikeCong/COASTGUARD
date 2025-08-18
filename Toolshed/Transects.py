@@ -20,6 +20,24 @@ import pyproj
 from pyproj import Proj
 from osgeo import gdal
 import rasterio as rio
+import os
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import LineString
+from datetime import datetime, timedelta
+import pytz
+import rasterio
+
+import os
+import numpy as np
+import rasterio
+from shapely.geometry import LineString
+from datetime import datetime, timedelta
+import pytz
+from .Toolbox import GetWaterElevs  # adjust import as needed
+from . import Slope  # if using fallback slope logic
+
 
 # other modules
 from sklearn.linear_model import LinearRegression
@@ -29,7 +47,7 @@ import rasterio as rio
 from rasterio.features import shapes
 from shapely.geometry import Point, Polygon, LineString, MultiLineString, MultiPoint
 from datetime import datetime, timedelta
-
+import rasterio
 
 from Toolshed import Toolbox, Waves, Slope
 from Toolshed.Coast import *
@@ -723,172 +741,645 @@ def TidalCorrection(settings, output, TransectInterGDFWater, AvBeachSlope=None):
     TransectInterGDFWater['wlcorrdist'] = CorrectedDists
     TransectInterGDFWater['tideelev'] = TidalStages
     TransectInterGDFWater['beachslope'] = BeachSlopes
-    
-    return TransectInterGDFWater
 
 
-def WLCorrections(settings, output, TransectInterGDFWater, TransectInterGDFWave=None, AvBeachSlope=None):
+
+def calculate_slope_for_transect(transect, cross_distances, slope_array, slope_transform, slope_nodata):
     """
-    IN DEVELOPMENT: This is an attempt to make TidalCorrection() more efficient.
-    
-    Correct cross-shore waterline distances to remove the effects of tides. Uses
-    the equation "x_corr = x + ( z / tan(beta) )", where x is cross-shore
-    distance along transect of waterline intersection, z is the tidal stage
-    at a chosen elevation above sea level (+ runup if available), and beta is 
-    the rise/run of the beach between mean sea level and mean high water spring. 
-    
-    FM Nov 2022
-    Updated Oct 2024
-
-    Parameters
-    ----------
-    settings : dict
-        Dictionary of user-defined settings used for the veg edge/waterline extraction.
-    output : dict
-        Dictionary of extracted veg edges (and waterlines) and associated info with each edge.
-    TransectInterGDFWater : GeoDataFrame
-        GeoDataFrame with information from transect-veg edge intersections extracted.
-    AvBeachSlope : float, optional
-        Average tan(Beta) value across the intertidal zone. The default value is None.
+    Calculate average slope along waterline intersection points on a transect
+    using values from a slope raster.
 
     Returns
     -------
-    TransectInterGDFWater : GeoDataFrame
-        GeoDataFrame with information from transect-veg edge intersections extracted, updated with
-        corrected WL distances, tidal elevation and beach slopes.
-
+    float: average tan(slope) in radians
+    list: raw slope values in degrees
     """
-    
-    print('Correcting waterline positions...')
-    # Parse satellite acquisition datetime and create lookup dictionary
+    coords = list(transect.coords)
+    pt0, pt1 = np.array(coords[0]), np.array(coords[-1])
+    v = pt1 - pt0
+    vmag = np.linalg.norm(v)
+    vnorm = v / vmag if vmag != 0 else np.array([1, 0])
+
+    slope_vals = []
+    for dist in cross_distances:
+        px, py = pt0 + dist * vnorm
+        row, col = rasterio.transform.rowcol(slope_transform, px, py)
+        if 0 <= row < slope_array.shape[0] and 0 <= col < slope_array.shape[1]:
+            val = slope_array[row, col]
+            if val != slope_nodata and not np.isnan(val) and 0 < val < 90:
+                slope_vals.append(val)
+
+    if slope_vals:
+        slope_deg = np.mean(slope_vals)
+        return np.tan(np.radians(slope_deg)), slope_vals
+    else:
+        return 0.1, []  # Fallback
+
+
+
+import os
+import numpy as np
+import rasterio
+from rasterio.sample import sample_gen
+from shapely.geometry import Point
+from shapely import ops as sops
+from datetime import datetime, timedelta
+import pytz
+from pyproj import Transformer
+
+# ---------- helpers ----------
+
+def _detect_slope_units(vals):
+    v = np.asarray(vals, float); v = v[np.isfinite(v)]
+    if v.size == 0: return 'dzdx'
+    p99 = float(np.nanpercentile(v, 99))
+    vmin, vmax = float(np.nanmin(v)), float(np.nanmax(v))
+    if vmin >= 0 and vmax <= 10 and p99 <= 3.0:  # dz/dx first
+        return 'dzdx'
+    if vmin >= 0 and p99 <= 90 and vmax <= 100:
+        return 'deg'
+    if vmin >= 0 and p99 <= 500 and vmax < 1000:
+        return 'percent'
+    return 'dzdx'
+
+def _to_dzdx(vals, units):
+    v = np.asarray(vals, float)
+    if units == 'deg':
+        return np.tan(np.deg2rad(v))
+    elif units == 'percent':
+        return v / 100.0
+    return v
+
+def _corr(a, b):
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 3 or np.nanstd(a[m]) == 0 or np.nanstd(b[m]) == 0:
+        return np.nan
+    return float(np.corrcoef(a[m], b[m])[0,1])
+
+def _project_geometry(geom, src_crs, dst_crs):
+    if (src_crs is None) or (dst_crs is None) or (src_crs == dst_crs):
+        return geom, None
+    tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True).transform
+    return sops.transform(tf, geom), tf
+
+def _sample_raster_xy(src, xs, ys):
+    out = []
+    for v in sample_gen(src, list(zip(xs, ys))):
+        v0 = v[0]
+        if v0 is None or (src.nodata is not None and np.isclose(v0, src.nodata)):
+            out.append(np.nan)
+        else:
+            out.append(float(v0))
+    return np.asarray(out, float)
+
+# ---------- main ----------
+
+def WLCorrections(
+    settings,
+    output,
+    TransectInterGDFWater,
+    TransectInterGDFWave=None,
+    AvBeachSlope=None,
+    *,
+    # NEW: we’ll use the DEM to compute intertidal slopes
+    dem_path="./DEM_32619_1m.tif",          # DEM in meters (same datum as tides/EWL)
+    slope_path=None,                         # optional slope raster (deg/%/dzdx) as fallback
+    slope_units='auto',                      # 'auto' | 'dzdx' | 'deg' | 'percent'
+    corridor_quantiles=(10,90),
+    step_m=1.0,
+    min_S=0.02,
+    max_S=0.6,
+    seaward_shift_m=15.0,                    # try bigger shift to escape flats
+    # Intertidal window in elevation (relative to DEM datum):
+    mlw_m=None, mhw_m=None,                  # if None, will estimate from tides
+    tidal_q_for_window=(10,90),              # used when mlw_m/mhw_m are None
+    pad_low=0.20, pad_high=0.50,             # expand window: [MLW-pad_low, MHW+pad_high] (m)
+    flat_cut=0.005,                          # drop slopes < 0.5%
+    robust_q=80,                             # fallback to upper quantile of slopes
+    min_pts=5,                               # min samples inside window
+    debug_every=10
+):
+    """
+    Waterline correction using wlinterpnt corridor + DEM-based intertidal slope.
+    1) Build wl corridor (qlo-qhi) along each transect.
+    2) For multiple offsets (0, ±shift, ±2*shift), sample DEM elevations along the corridor,
+       keep only points with elevation in [MLW-pad_low, MHW+pad_high], and compute S as the
+       median of |Δz/Δx| between adjacent points (robust).
+    3) If that fails, fall back to slope raster sampling (converted to dz/dx).
+    4) Clamp S to [min_S, max_S] and pick the best offset (largest S within bounds).
+    5) Choose correction sign that minimizes |corr(x_corr, EWL)|.
+    """
+
+    print('Correcting waterline positions (wlinterpnt corridor + DEM intertidal slope)...')
+
+    # Open DEM (required)
+    if not os.path.exists(dem_path):
+        raise FileNotFoundError(f"DEM not found: {dem_path}")
+    dem_src = rasterio.open(dem_path)
+    print(f"Using DEM '{dem_path}' (CRS={dem_src.crs})")
+
+    # Optional slope raster fallback
+    slope_src = None
+    if slope_path and os.path.exists(slope_path):
+        slope_src = rasterio.open(slope_path)
+        print(f"Using slope raster '{slope_path}' (CRS={slope_src.crs})")
+
+    # 1) datetimes
     dates_sat = []
-    
     for date, time in zip(output["dates"], output["times"]):
-        time = str(time).strip() if time else ""
-        
-        # Catch invalid or missing time strings
-        if "UTC" in time or not time or len(time.split(":")) < 2:
-            time = "00:00:00.000"
-    
+        t = str(time).strip() if time else "00:00:00.000"
+        if "UTC" in t or len(t.split(":")) < 2:
+            t = "00:00:00.000"
         try:
-            dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M:%S.%f")
-        except ValueError as e:
+            dt = datetime.strptime(f"{date} {t}", "%Y-%m-%d %H:%M:%S.%f")
+        except:
             try:
-                dt = datetime.strptime(date, "%Y-%m-%d")
-                dt = dt.replace(hour=0, minute=0)
-            except Exception as e2:
-                print(f"Skipping invalid datetime: {date} {time} — {e2}")
+                dt = datetime.strptime(date, "%Y-%m-%d").replace(hour=0, minute=0)
+            except:
                 continue
-    
         dates_sat.append(dt)
-    
     dates_sat_cleaned = [dt for dt in dates_sat if isinstance(dt, datetime)]
-    
-    # Extra sanity check
-    # FINAL sanity check — print all dates and types
     print("\n=== FINAL dates passed to GetWaterElevs ===")
     for i, d in enumerate(dates_sat_cleaned):
         print(f"{i}: {d} ({type(d)})")
 
-    # Generate daily timesteps between first and last output dates
-    hourlytides, dailymeantides, dailymaxtides = Toolbox.GetWaterElevs(settings, dates_sat_cleaned, Daily=True)
+    # 2) tides / runup → EWL
+    hourlytides, dailymeantides, dailymaxtides = GetWaterElevs(settings, dates_sat_cleaned, Daily=True)
     tide_dict = dict(zip(dates_sat, hourlytides))
-    
-    # Clip tide data down to output dates
-    startdt = datetime.strptime(output['dates'][0]+' 00:00:00', '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
-    enddt = datetime.strptime(output['dates'][-1]+' 00:00:00', '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC) + timedelta(days=1)
 
-    
-    dailymeantides = dailymeantides[(dailymeantides.index >= startdt) 
-                                    & (dailymeantides.index < enddt)]
-    dailymaxtides = dailymaxtides[(dailymaxtides.index >= startdt) 
-                                    & (dailymaxtides.index < enddt)]
-    print(dailymeantides.index.tz)
+    startdt = datetime.strptime(output['dates'][0] + ' 00:00:00', '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
+    enddt   = datetime.strptime(output['dates'][-1]+ ' 00:00:00', '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC) + timedelta(days=1)
+    dailymeantides = dailymeantides[(dailymeantides.index >= startdt) & (dailymeantides.index < enddt)]
+    dailymaxtides  = dailymaxtides[(dailymaxtides.index  >= startdt) & (dailymaxtides.index  < enddt)]
 
-    # If wave data is provided, add runups to tidal correction
     if TransectInterGDFWave is not None:
-        print('using runup as well as tides...')
-        # need to set any nans in runup to 0 to avoid setting all operations to nan
-        runup_dict = dict(zip(TransectInterGDFWave['WaveDates'].iloc[0], [0 if np.isnan(x) else x for x in TransectInterGDFWave['Runups'].iloc[0]])) # first entry should have all runups
-        TWL_dict = dict(zip(dates_sat, [tide_dict[date] + runup_dict[date] for date in dates_sat]))
-    else: # if no runups available, just use tides
-        TWL_dict = tide_dict.copy()
-    
-    # Reference elevation
-    RefElev = 0
-    
-    # Initialize lists for each transect's final data
-    BeachSlopes, TidalStages, TidalStagesDailyMean, TidalStagesDailyMax, TidalDatesDaily, CorrectedDists = [], [], [], [], [], []
-    
-    # Path to DEM file for slope calculation (if available)
-    DEMpath = os.path.join(settings['inputs']['filepath'], 'tides', f"{settings['inputs']['sitename']}_DEM.tif")
-    
-    # Precomputed beach slope if available
-    if os.path.exists(DEMpath):
-        print('beach slope being derived from provided DEM...')
-        MSL, MHWS = 1.0, 0.1
-        BeachSlopeDEM = GetBeachSlopesDEM(MSL, MHWS, DEMpath)
+        print('Using runup as well as tides...')
+        runup_dict = dict(zip(
+            TransectInterGDFWave['WaveDates'].iloc[0],
+            [0 if np.isnan(x) else x for x in TransectInterGDFWave['Runups'].iloc[0]]
+        ))
+        TWL_dict = dict(zip(dates_sat, [tide_dict.get(date,0) + runup_dict.get(date,0) for date in dates_sat]))
     else:
-        BeachSlopeDEM = None  # No DEM slope
-    
-    # Process each transect
-    for Tr, transect in TransectInterGDFWater.iterrows():
-        print(f"\r corrected {Tr} / {len(TransectInterGDFWater)} transects", end='')       
-        # Gather and match dates for each transect's observations
-        dates_dt_tr = [datetime.strptime(date_str, '%Y-%m-%d').date() for date_str in transect['wldates']]
-        dates_sat_tr = [datetime.combine(date, next(dt.time() for dt in dates_sat if dt.date() == date)) for date in dates_dt_tr]
-        tides_sat_tr = [tide_dict[date] for date in dates_sat_tr]
-        TWL_tr = [TWL_dict[date] for date in dates_sat_tr]
-        
-        # Retrieve transect cross distances
-        cross_distances = transect['wldists']
-    
-        # Determine beach slope for this transect
-        if BeachSlopeDEM is not None:
-            BeachSlope = BeachSlopeDEM
-        elif AvBeachSlope is not None:
-            BeachSlope = AvBeachSlope
-        else:
-            # Calculate beach slope dynamically if needed
-            if len(dates_sat_tr) < 10:
-                BeachSlope = 0.1
-            else:
-                # Use DefineSlopeSettings to include required keys like 'n_days'
-                slope_settings = Slope.DefineSlopeSettings(cross_distances)
-                slope_settings["transect_id"] = Tr
-                slope_settings["out_folder"] = os.path.join(settings["inputs"]["filepath"], "tide_energy_img")
-        
-                BeachSlope = Slope.CoastSatSlope(
-                    dates_sat_tr,
-                    tides_sat_tr,
-                    cross_distances,
-                    settings_slope=slope_settings
-                )
+        TWL_dict = tide_dict.copy()
 
-    
-        # Correct each cross-shore distance for tidal elevation
-        CorrectedDistsTr = [
-            cross_distance + ((z - RefElev) / BeachSlope)
-            for cross_distance, z in zip(cross_distances, TWL_tr)
-        ]
-           
-        # Append results for this transect
-        CorrectedDists.append(CorrectedDistsTr)
-        BeachSlopes.append(BeachSlope)
-        TidalStages.append(tides_sat_tr)
+    # 3) MLW/MHW (in DEM datum)
+    if (mlw_m is None) or (mhw_m is None):
+        tq_lo, tq_hi = tidal_q_for_window
+        tide_vals = np.asarray(list(tide_dict.values()), float)
+        mlw_m = float(np.nanpercentile(tide_vals, tq_lo))
+        mhw_m = float(np.nanpercentile(tide_vals, tq_hi))
+        print(f"[INFO] Intertidal window estimated from tides: MLW≈{mlw_m:.2f} m, MHW≈{mhw_m:.2f} m")
+    elev_lo = mlw_m - pad_low
+    elev_hi = mhw_m + pad_high
+    print(f"[INFO] Using elevation mask: [{elev_lo:.2f}, {elev_hi:.2f}] m")
+
+    RefElev = 0.0
+
+    # 4) outputs
+    BeachSlopes, TidalStages, TidalStagesDailyMean, TidalStagesDailyMax, TidalDatesDaily, CorrectedDists = [], [], [], [], [], []
+    SOffsets, SSource, SignUsed = [], [], []
+
+    qlo, qhi = corridor_quantiles
+
+    # Transformers to raster CRSs
+    tf_dem = None
+    if getattr(TransectInterGDFWater, 'crs', None) != dem_src.crs:
+        tf_dem = Transformer.from_crs(TransectInterGDFWater.crs, dem_src.crs, always_xy=True).transform
+    tf_slope = None
+    if slope_src is not None and getattr(TransectInterGDFWater, 'crs', None) != slope_src.crs:
+        tf_slope = Transformer.from_crs(TransectInterGDFWater.crs, slope_src.crs, always_xy=True).transform
+
+    for Tr, transect in TransectInterGDFWater.iterrows():
+        print(f"\rCorrecting transect {Tr + 1} / {len(TransectInterGDFWater)}", end='')
+
+        # align dates
+        try:
+            dates_dt_tr = [datetime.strptime(dstr, '%Y-%m-%d').date() for dstr in transect['wldates']]
+            dates_sat_tr = [datetime.combine(d, next(dt.time() for dt in dates_sat if dt.date() == d)) for d in dates_dt_tr]
+        except:
+            BeachSlopes.append(np.nan); TidalStages.append([]); TidalDatesDaily.append([])
+            TidalStagesDailyMean.append([]); TidalStagesDailyMax.append([]); CorrectedDists.append([])
+            SOffsets.append(np.nan); SSource.append('none'); SignUsed.append('unknown')
+            continue
+
+        EWL_tr = [TWL_dict.get(date, 0.0) for date in dates_sat_tr]
+        x_raw  = np.asarray(transect['wldists'], dtype=float)
+
+        # wl/veg positions in DEM CRS
+        line = transect.geometry
+        line_dem = sops.transform(tf_dem, line) if tf_dem else line
+
+        wlpts = transect.get('wlinterpnt', []) or []
+        wlpts_dem = [Point(*tf_dem(p.x, p.y)) for p in wlpts] if (tf_dem and wlpts) else [Point(p.x, p.y) for p in wlpts]
+        s_wl = np.array([line_dem.project(p) for p in wlpts_dem], float) if wlpts_dem else np.array([], float)
+
+        vegpts = transect.get('interpnt', []) or []
+        vegpts_dem = [Point(*tf_dem(p.x, p.y)) for p in vegpts] if (tf_dem and vegpts) else [Point(p.x, p.y) for p in vegpts]
+        s_veg = np.array([line_dem.project(p) for p in vegpts_dem], float) if vegpts_dem else np.array([], float)
+
+        # corridor from wlinterpnt
+        if s_wl.size >= 5:
+            d10, d90 = np.nanpercentile(s_wl, [qlo, qhi])
+        else:
+            med = float(np.nanmedian(x_raw)) if np.isfinite(np.nanmedian(x_raw)) else 0.0
+            d10, d90 = med - 5.0, med + 5.0
+        if (not np.isfinite(d10)) or (not np.isfinite(d90)) or (d90 - d10 < 4.0):
+            med = float(np.nanmedian(x_raw)) if np.isfinite(np.nanmedian(x_raw)) else 0.0
+            d10, d90 = med - 5.0, med + 5.0
+
+        # seaward sign
+        if s_wl.size and s_veg.size:
+            seaward_sign = np.sign(np.nanmedian(s_wl) - np.nanmedian(s_veg)) or 1.0
+        else:
+            seaward_sign = 1.0
+
+        # --- DEM-based S sampler (intertidal masked) ---
+        def S_from_DEM(offset_m):
+            s0, s1 = d10 + offset_m, d90 + offset_m
+            if s1 < s0: s0, s1 = s1, s0
+            s_vals = np.arange(s0, s1 + step_m, step_m, dtype=float)
+            if s_vals.size == 0: return np.nan, 0, 0
+
+            pts = [line_dem.interpolate(s) for s in s_vals]
+            xs = np.array([p.x for p in pts], float)
+            ys = np.array([p.y for p in pts], float)
+            z  = _sample_raster_xy(dem_src, xs, ys)
+
+            m = np.isfinite(z) & (z >= elev_lo) & (z <= elev_hi)
+            if m.sum() < min_pts:
+                return np.nan, m.sum(), z.size
+
+            s_mask = s_vals[m]; z_mask = z[m]
+            # adjacent-slope median (robust)
+            dz = np.diff(z_mask); dx = np.diff(s_mask)
+            slopes = dz / np.where(dx == 0, np.nan, dx)
+            slopes = slopes[np.isfinite(slopes)]
+            if slopes.size == 0:
+                return np.nan, m.sum(), z.size
+
+            # magnitude; drop tiny
+            slopes = np.abs(slopes)
+            keep = slopes > flat_cut
+            slopes_keep = slopes[keep]
+            if slopes_keep.size >= 3:
+                S_med = float(np.nanmedian(slopes_keep))
+            else:
+                S_med = float(np.nanpercentile(slopes, robust_q))  # use upper quantile to avoid flats
+
+            if np.isfinite(S_med):
+                S_med = max(min_S, min(max_S, S_med))
+            return S_med, m.sum(), z.size
+
+        # --- optional slope raster fallback (in its CRS) ---
+        def S_from_slope_raster(offset_m):
+            if slope_src is None: return np.nan
+            line_slp = sops.transform(tf_slope, line) if tf_slope else line
+            s0, s1 = d10 + offset_m, d90 + offset_m
+            if s1 < s0: s0, s1 = s1, s0
+            s_vals = np.arange(s0, s1 + step_m, step_m, dtype=float)
+            if s_vals.size == 0: return np.nan
+            pts = [line_slp.interpolate(s) for s in s_vals]
+            xs = np.array([p.x for p in pts], float)
+            ys = np.array([p.y for p in pts], float)
+            raw = _sample_raster_xy(slope_src, xs, ys)
+            v = raw[np.isfinite(raw)]
+            if v.size == 0: return np.nan
+            units = slope_units if slope_units != 'auto' else _detect_slope_units(v)
+            S_vals = _to_dzdx(v, units)
+            S_vals = S_vals[S_vals > flat_cut]
+            if S_vals.size == 0: return np.nan
+            S_med = float(np.nanmedian(S_vals))
+            if np.isfinite(S_med):
+                S_med = max(min_S, min(max_S, S_med))
+            return S_med
+
+        # try multiple offsets
+        offsets = [0.0,
+                   seaward_shift_m*seaward_sign, -seaward_shift_m*seaward_sign,
+                   2*seaward_shift_m*seaward_sign, -2*seaward_shift_m*seaward_sign]
+
+        candidates = []
+        for off in offsets:
+            S_dem, n_keep, n_all = S_from_DEM(off)
+            if np.isfinite(S_dem):
+                candidates.append(("DEM", off, S_dem, f"keep={n_keep}/{n_all}"))
+            else:
+                S_slp = S_from_slope_raster(off)
+                if np.isfinite(S_slp):
+                    candidates.append(("SLOPE", off, S_slp, "raster"))
+
+        if len(candidates):
+            # prefer DEM result; otherwise slope raster.
+            dem_cands = [c for c in candidates if c[0] == "DEM"]
+            use_list = dem_cands if dem_cands else candidates
+            # pick larger S within bounds
+            best = max(use_list, key=lambda t: t[2])
+            src_tag, chosen_offset, S_eff, detail = best
+            source = f"{src_tag}_corridor[{qlo}-{qhi}]_offset={chosen_offset:+.1f}m; {detail}"
+        else:
+            # fallback if everything failed
+            if AvBeachSlope and np.isfinite(AvBeachSlope):
+                S_eff = float(AvBeachSlope); chosen_offset = 0.0; source = 'AvBeachSlope'
+            else:
+                S_eff = 0.1; chosen_offset = 0.0; source = 'default_0.1'
+
+        S_eff = max(min_S, min(max_S, S_eff))
+
+        # 5) apply correction; pick sign
+        EWL_arr = np.asarray(EWL_tr, float)
+        x_raw_arr = np.asarray(x_raw, float)
+        x_minus = x_raw_arr - (EWL_arr - RefElev) / S_eff
+        x_plus  = x_raw_arr + (EWL_arr - RefElev) / S_eff
+        c_minus = _corr(x_minus, EWL_arr)
+        c_plus  = _corr(x_plus,  EWL_arr)
+        if np.isnan(c_minus) and np.isnan(c_plus):
+            x_corr = x_minus; sign_used = '-'
+        else:
+            if np.isnan(c_minus):   sign_used, x_corr = '+', x_plus
+            elif np.isnan(c_plus):  sign_used, x_corr = '-', x_minus
+            else:
+                sign_used, x_corr = ('-', x_minus) if abs(c_minus) <= abs(c_plus) else ('+', x_plus)
+
+        # store
+        CorrectedDists.append(x_corr.astype(float).tolist())
+        BeachSlopes.append(float(S_eff))
+        TidalStages.append(EWL_arr.astype(float).tolist())
         TidalDatesDaily.append(dailymeantides.index.to_list())
         TidalStagesDailyMean.append(dailymeantides.to_list())
         TidalStagesDailyMax.append(dailymaxtides.to_list())
-        
-    # Add results back to TransectInterGDFWater
-    TransectInterGDFWater['wlcorrdist'] = CorrectedDists
-    TransectInterGDFWater['tideelev'] = TidalStages
-    TransectInterGDFWater['tidedatesFD'] = TidalDatesDaily
-    TransectInterGDFWater['tideelevFD'] = TidalStagesDailyMean
-    TransectInterGDFWater['tideelevMx'] = TidalStagesDailyMax
-    TransectInterGDFWater['beachslope'] = BeachSlopes
+        SOffsets.append(float(chosen_offset))
+        SSource.append(source)
+        SignUsed.append(sign_used)
 
+        if (Tr % debug_every == 0):
+            print(f"\n[DEBUG] Transect {Tr}")
+            print(f"  Window z∈[{elev_lo:.2f},{elev_hi:.2f}] m; offset {chosen_offset:+.1f} m; S={S_eff:.3f} ({source})")
+            print(f"  Corr raw(x,EWL)={_corr(x_raw_arr,EWL_arr):.3f}; '-'→{_corr(x_minus,EWL_arr):.3f}; '+'→{_corr(x_plus,EWL_arr):.3f}; used '{sign_used}'")
+
+    # write back
+    TransectInterGDFWater['wlcorrdist']   = CorrectedDists
+    TransectInterGDFWater['tideelev']     = TidalStages
+    TransectInterGDFWater['tidedatesFD']  = TidalDatesDaily
+    TransectInterGDFWater['tideelevFD']   = TidalStagesDailyMean
+    TransectInterGDFWater['tideelevMx']   = TidalStagesDailyMax
+    TransectInterGDFWater['beachslope']   = BeachSlopes
+    TransectInterGDFWater['S_source']     = SSource
+    TransectInterGDFWater['S_offset_m']   = SOffsets
+    TransectInterGDFWater['sign_used']    = SignUsed
+
+    # close rasters
+    dem_src.close()
+    if slope_src is not None:
+        slope_src.close()
+
+    print("\nWaterline correction complete (DEM intertidal slope).")
     return TransectInterGDFWater
+
+# ===================== EXPORT WL PROCESS TO QGIS =====================
+# Creates a GeoPackage with 3 layers + a CSV of time series.
+# ===================== EXPORT WL PROCESS TO QGIS (robust) =====================
+import os
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import rasterio
+from rasterio.sample import sample_gen
+from shapely.geometry import Point, LineString
+from shapely import ops as sops
+from pyproj import Transformer
+
+# ---------- helpers ----------
+
+def _detect_slope_units(vals):
+    v = np.asarray(vals, float); v = v[np.isfinite(v)]
+    if v.size == 0: return 'dzdx'
+    p99 = float(np.nanpercentile(v, 99))
+    vmin, vmax = float(np.nanmin(v)), float(np.nanmax(v))
+    if vmin >= 0 and vmax <= 10 and p99 <= 3.0:  return 'dzdx'
+    if vmin >= 0 and p99 <= 90 and  vmax <= 100: return 'deg'
+    if vmin >= 0 and p99 <= 500 and vmax < 1000: return 'percent'
+    return 'dzdx'
+
+def _to_dzdx(v, units):
+    v = np.asarray(v, float)
+    if units == 'deg':     return np.tan(np.deg2rad(v))
+    if units == 'percent': return v / 100.0
+    return v
+
+def _sample_xy(src, xs, ys):
+    return np.array([val[0] if val[0] is not None else np.nan
+                     for val in sample_gen(src, list(zip(xs, ys)))], float)
+
+def _corr(a, b):
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 3 or np.nanstd(a[m]) == 0 or np.nanstd(b[m]) == 0:
+        return np.nan
+    return float(np.corrcoef(a[m], b[m])[0,1])
+
+# ---------- main exporter ----------
+
+def export_wl_process_to_gpkg(
+    TransectInterGDFWater: gpd.GeoDataFrame,
+    *,
+    dem_path="./DEM_32619_1m.tif",              # DEM in meters (same vertical datum as EWL)
+    slope_path=None,                             # optional slope raster (deg/%/dzdx)
+    slope_units='auto',                          # 'auto'|'dzdx'|'deg'|'percent'
+    corridor_quantiles=(10,90),                  # wlinterpnt corridor percentiles
+    step_m=1.0,
+    gpkg_out="wl_correction_diagnostics.gpkg",
+    csv_out="wl_timeseries.csv",
+    # elevation window (if None, inferred from EWL across all transects)
+    mlw_m=None, mhw_m=None, pad_low=0.20, pad_high=0.50
+):
+    # --- open rasters
+    if not os.path.exists(dem_path):
+        raise FileNotFoundError(f"DEM not found: {dem_path}")
+    dem_src = rasterio.open(dem_path)
+    slope_src = rasterio.open(slope_path) if (slope_path and os.path.exists(slope_path)) else None
+
+    # --- compute elevation window if not provided
+    if (mlw_m is None) or (mhw_m is None):
+        all_ewl = []
+        if 'tideelev' in TransectInterGDFWater.columns:
+            for arr in TransectInterGDFWater['tideelev']:
+                if isinstance(arr, (list, np.ndarray, pd.Series)):
+                    all_ewl.extend(arr)
+        all_ewl = np.asarray(all_ewl, float)
+        all_ewl = all_ewl[np.isfinite(all_ewl)]
+        if all_ewl.size:
+            qlo, qhi = corridor_quantiles
+            mlw_m = float(np.nanpercentile(all_ewl, qlo))
+            mhw_m = float(np.nanpercentile(all_ewl, qhi))
+        else:
+            mlw_m, mhw_m = 0.0, 1.0
+    elev_lo, elev_hi = mlw_m - pad_low, mhw_m + pad_high
+    print(f"[export] elevation mask [{elev_lo:.2f},{elev_hi:.2f}] m (MLW≈{mlw_m:.2f}, MHW≈{mhw_m:.2f})")
+
+    # --- CRS transforms to DEM and slope
+    tf_dem = None
+    if TransectInterGDFWater.crs != dem_src.crs:
+        tf_dem = Transformer.from_crs(TransectInterGDFWater.crs, dem_src.crs, always_xy=True).transform
+    tf_slp = None
+    if slope_src and TransectInterGDFWater.crs != slope_src.crs:
+        tf_slp = Transformer.from_crs(TransectInterGDFWater.crs, slope_src.crs, always_xy=True).transform
+
+    qlo, qhi = corridor_quantiles
+    pt_rows, cor_rows, cor_geoms, sum_rows = [], [], [], []
+
+    # Precompute lines in DEM CRS for summary layer geometry
+    if TransectInterGDFWater.crs != dem_src.crs:
+        lines_dem = [sops.transform(tf_dem, geom) for geom in TransectInterGDFWater.geometry]
+    else:
+        lines_dem = list(TransectInterGDFWater.geometry)
+
+    # --- iterate transects
+    for idx, tr in TransectInterGDFWater.iterrows():
+        line = tr.geometry
+        line_dem = lines_dem[idx]  # DEM CRS
+        line_len = float(line_dem.length)
+
+        # corridor from wlinterpnt
+        wlpts = tr.get('wlinterpnt', []) or []
+        if wlpts:
+            wlpts_dem = [Point(*tf_dem(p.x, p.y)) for p in wlpts] if tf_dem else [Point(p.x, p.y) for p in wlpts]
+            s_wl = np.array([line_dem.project(p) for p in wlpts_dem], float)
+        else:
+            s_wl = np.array([], float)
+
+        if s_wl.size >= 5:
+            d0, d1 = np.nanpercentile(s_wl, [qlo, qhi])
+        else:
+            x_raw = np.asarray(tr.get('wldists', []), float)
+            med = float(np.nanmedian(x_raw)) if np.isfinite(np.nanmedian(x_raw)) else 0.0
+            d0, d1 = med - 5.0, med + 5.0
+        if d1 < d0: d0, d1 = d1, d0
+
+        # offset actually used during correction
+        off = float(tr.get('S_offset_m', 0.0))
+        s0 = max(0.0, min(d0 + off, line_len))
+        s1 = max(0.0, min(d1 + off, line_len))
+
+        # ensure s1 >= s0 and corridor has >0 length (avoid 1-point lines)
+        if s1 < s0:
+            s0, s1 = s1, s0
+        if np.isclose(s1, s0):
+            eps = max(1e-3*max(1.0, step_m), 1e-6*line_len)  # tiny nudge
+            s1 = min(line_len, s0 + eps)
+
+        # number of samples (≥2) and positions
+        n_pts = max(2, int(np.floor((s1 - s0)/step_m)) + 1)
+        s_vals = np.linspace(s0, s1, n_pts, dtype=float)
+
+        # Build corridor geometry (LineString in DEM CRS)
+        cor_pts = [line_dem.interpolate(s) for s in s_vals]
+        cor_geoms.append(LineString([(p.x, p.y) for p in cor_pts]))
+        cor_rows.append({"transect_id": idx, "offset_m": off, "s_start": float(s_vals[0]), "s_end": float(s_vals[-1])})
+
+        # Sample DEM along corridor
+        xs = np.array([p.x for p in cor_pts]); ys = np.array([p.y for p in cor_pts])
+        z_dem = _sample_xy(dem_src, xs, ys)
+
+        # Optional slope raster (raw + dz/dx)
+        if slope_src:
+            line_slp = sops.transform(tf_slp, line) if tf_slp else line
+            pts_slp = [line_slp.interpolate(s) for s in s_vals]
+            xs_s = np.array([p.x for p in pts_slp]); ys_s = np.array([p.y for p in pts_slp])
+            sl_raw = _sample_xy(slope_src, xs_s, ys_s)
+            units = slope_units if slope_units != 'auto' else _detect_slope_units(sl_raw[np.isfinite(sl_raw)])
+            sl_dzdx = _to_dzdx(sl_raw, units)
+        else:
+            sl_raw  = np.full_like(z_dem, np.nan)
+            sl_dzdx = np.full_like(z_dem, np.nan)
+            units   = 'none'
+
+        # Intertidal mask flag
+        used_mask = (z_dem >= elev_lo) & (z_dem <= elev_hi) & np.isfinite(z_dem)
+
+        # Local profile slopes (assign to point i from (i-1)->i)
+        prof_dzdx = np.full_like(z_dem, np.nan, dtype=float)
+        if s_vals.size >= 2:
+            dz = np.diff(z_dem); dx = np.diff(s_vals)
+            seg = np.abs(dz / np.where(dx == 0, np.nan, dx))
+            prof_dzdx[1:] = seg
+
+        # Accumulate per-point attributes
+        for i in range(s_vals.size):
+            pt_rows.append({
+                "transect_id": idx,
+                "s_m": float(s_vals[i]),
+                "x": float(xs[i]), "y": float(ys[i]),
+                "dem_m": float(z_dem[i]) if np.isfinite(z_dem[i]) else np.nan,
+                "used_mask": int(bool(used_mask[i])),
+                "slope_raster_raw": float(sl_raw[i]) if np.isfinite(sl_raw[i]) else np.nan,
+                "slope_raster_units": units,
+                "slope_raster_dzdx": float(sl_dzdx[i]) if np.isfinite(sl_dzdx[i]) else np.nan,
+                "profile_dzdx_local": float(prof_dzdx[i]) if np.isfinite(prof_dzdx[i]) else np.nan,
+                "offset_m": off
+            })
+
+        # Per-transect summary
+        ewl = np.asarray(tr.get('tideelev', []), float)
+        x0  = np.asarray(tr.get('wldists', []), float)
+        x1  = np.asarray(tr.get('wlcorrdist', []), float)
+        sum_rows.append({
+            "transect_id": idx,
+            "beachslope": float(tr.get('beachslope', np.nan)),
+            "S_source":   tr.get('S_source', None),
+            "S_offset_m": off,
+            "elev_lo": elev_lo, "elev_hi": elev_hi,
+            "keep_pts": int(np.nansum(used_mask)),
+            "total_pts": int(s_vals.size),
+            "corr_raw":  _corr(x0, ewl),
+            "corr_after": _corr(x1, ewl),
+            "sign_used": tr.get('sign_used', None)
+        })
+
+    # ---------- build GeoDataFrames ----------
+    gdf_pts = gpd.GeoDataFrame(
+        pt_rows,
+        geometry=[Point(r["x"], r["y"]) for r in pt_rows],
+        crs=dem_src.crs
+    )
+    gdf_sum = gpd.GeoDataFrame(sum_rows, geometry=lines_dem, crs=dem_src.crs)
+    gdf_cor = gpd.GeoDataFrame(cor_rows, geometry=cor_geoms, crs=dem_src.crs)
+
+    # ---------- write files ----------
+    if os.path.exists(gpkg_out):
+        os.remove(gpkg_out)
+    gdf_sum.to_file(gpkg_out, layer="transects_summary", driver="GPKG")
+    gdf_pts.to_file(gpkg_out, layer="samples_points",   driver="GPKG")
+    gdf_cor.to_file(gpkg_out, layer="corridors",        driver="GPKG")
+    print(f"[export] wrote layers to {gpkg_out}")
+
+    # Time-series CSV (long format)
+    rows_ts = []
+    for idx, tr in TransectInterGDFWater.iterrows():
+        ewl = tr.get('tideelev', [])
+        x0  = tr.get('wldists', [])
+        x1  = tr.get('wlcorrdist', [])
+        dates = tr.get('wldates', [])
+        n = min(len(ewl), len(x0), len(x1), len(dates))
+        for i in range(n):
+            rows_ts.append({
+                "transect_id": idx,
+                "date": dates[i],
+                "EWL": ewl[i],
+                "x_raw": x0[i],
+                "x_corr": x1[i]
+            })
+    pd.DataFrame(rows_ts).to_csv(csv_out, index=False)
+    print(f"[export] wrote {csv_out}")
+
+    # close rasters
+    dem_src.close()
+    if slope_src: slope_src.close()
+
+
+
+
+
 
 
 def CalcIribarrens(TransectInterGDFWave, TransectInterGDFWater):
