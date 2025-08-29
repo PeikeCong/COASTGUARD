@@ -431,11 +431,13 @@ def label_vegimages(metadata, settings):
         for i in range(len(filenames)):
             # image filename
             fn = int(i)
+
+            # NEW define polygon
+            polygon = settings['inputs']['polygon']
             if satname == 'PSScene4Band':
                 dates = [metadata[satname]['dates'],metadata[satname]['dates']]
             else:
                 dates = [metadata[satname]['dates'][i],metadata[satname]['dates'][i]]
-                polygon = settings['inputs']['polygon']
 
             # read and preprocess image
             im_ms, georef, cloud_mask, im_extra, im_QA, im_nodata, acqtime = Image_Processing.preprocess_single(ImgColl, init_georef, fn, datelist, filenames, satname, settings, polygon, dates, skipped)
@@ -578,7 +580,9 @@ def label_vegimages(metadata, settings):
                 selector_veg = SelectFromImage(ax, implot, color_veg)
                 key_event = {}
                 while True:
-                    fig.canvas.draw_idle()                         
+                    fig.canvas.draw_idle()
+                    fig.canvas.flush_events()
+                    plt.pause(0.1)                         
                     fig.canvas.mpl_connect('key_press_event', press)
                     plt.waitforbuttonpress()
                     if key_event.get('pressed') == 'enter':
@@ -606,6 +610,7 @@ def label_vegimages(metadata, settings):
                 ax.set_title('Click and hold to draw lassos and select OTHER nveg pixels\nwhen finished press <Enter>')
                 fig.canvas.draw_idle() 
                 selector_nveg = SelectFromImage(ax, implot, color_nveg)
+                print("Selector created — ready to draw VEG pixels")
                 key_event = {}
                 while True:
                     fig.canvas.draw_idle()                         
@@ -691,28 +696,45 @@ def label_WV_images(metadata, polygon, Sat, settings):
     mng = plt.get_current_fig_manager()                                         
     mng.window.showMaximized()
 
-    # loop through satellites
-    for satname in metadata.keys():
-        if satname == 'PSScene4Band':
-            filepath = os.path.dirname(metadata[satname]['filenames'])
-        else:
-            filepath = Toolbox.get_filepath(settings['inputs'],satname)
-        if len(metadata[satname]['filenames']) < 2: # for single images; for loop list needs to be nested
-            filenames = [metadata[satname]['filenames']]
-        else:
-            filenames = metadata[satname]['filenames']
+    # NEW FROM VEGLABEL
+    sitename = settings['inputs']['sitename']
+    # ref_line = np.delete(settings['reference_shoreline'],2,1)
+    filepath_data = settings['inputs']['filepath']
+    filepath_out = os.path.join(filepath_data, sitename)
+    satnames, output, output_latlon, output_proj, skipped = Toolbox.ResumeVeglines(filepath_data, filepath_out, sitename, metadata)
+    imgcount = 0
+    
+    # NEW FROM VEG LABELS
+    # loop through satellite list
+    for satname in satnames:
+        
+        imgcount += len(metadata[satname]['filenames'])
+        # get images
+        #filepath = Toolbox.get_filepath(settings['inputs'],satname)
+        filenames = metadata[satname]['filenames']
+        datelist = metadata[satname]['dates']
+        # Collate filenames of images per platform
+        imgs = []
+        for i in range(len(filenames)):
+            imgs.append(ee.Image(filenames[i]))
             
+        # get pixel sizes, image collections and georefs for each platform
+        pixel_size, clf_model, ImgColl, init_georef = Image_Processing.InitialiseImgs(metadata, settings, satname, imgs)
+        
         # loop through images
         for i in range(len(filenames)):
             # image filename
             fn = int(i)
+
+            # NEW define polygon
+            polygon = settings['inputs']['polygon']
             if satname == 'PSScene4Band':
                 dates = [metadata[satname]['dates'],metadata[satname]['dates']]
             else:
                 dates = [metadata[satname]['dates'][i],metadata[satname]['dates'][i]]
-            
+
             # read and preprocess image
-            im_ms, georef, cloud_mask, im_extra, im_QA, im_nodata = Image_Processing.preprocess_single(fn, filenames, satname, settings, polygon, dates, savetifs=False)
+            im_ms, georef, cloud_mask, im_extra, im_QA, im_nodata, acqtime = Image_Processing.preprocess_single(ImgColl, init_georef, fn, datelist, filenames, satname, settings, polygon, dates, skipped)
 
             # compute cloud_cover percentage (with no data pixels)
             cloud_cover_combined = np.divide(sum(sum(cloud_mask.astype(int))),
@@ -827,12 +849,8 @@ def label_WV_images(metadata, polygon, Sat, settings):
                 
                 # save labelled image
                 ax.set_title(filename)
-                fig.canvas.draw_idle()                         
-                fp = os.path.join(filepath_train,settings['inputs']['sitename'])
-                if not os.path.exists(fp):
-                    os.makedirs(fp)
-                fig.savefig(os.path.join(fp,filename+'.jpg'), dpi=150)
-                ax.clear()
+                fig.canvas.draw_idle()
+                # NEW deleted save figures but add a new one next                        
                 
                 # calculate features from band values and their indices (e.g. 20 for CoastSat with S2)
                 # 'features{class}(row,col) corresponds to {land type}(pixel values,bands/band indices)'
@@ -842,8 +860,26 @@ def label_WV_images(metadata, polygon, Sat, settings):
                     features[key] = VegetationLine.calculate_WV_features(im_ms, cloud_mask, im_bool)
                 training_data = {'labels':im_labels, 'features':features, 'label_ids':settings['labels']}
                 # save labels and features
-                with open(os.path.join(fp, filename + '.pkl'), 'wb') as f:
-                    pickle.dump(training_data,f)
+                # NEW
+                # Create output directory
+                out_dir = os.path.join(
+                    filepath_train,                       
+                    settings['inputs']['sitename'],       
+                    satname                               
+                )
+                os.makedirs(out_dir, exist_ok=True) 
+
+                # Strip any path components so we only keep the file stem
+                file_stem = os.path.splitext(os.path.basename(filename))[0]   # -> 20230122_145737_composite
+
+                # Build full paths
+                jpg_path = os.path.join(out_dir, f"{file_stem}.jpg")
+                pkl_path = os.path.join(out_dir, f"{file_stem}.pkl")
+                fig.savefig(jpg_path, dpi=150)
+
+                with open(pkl_path, "wb") as f:
+                    pickle.dump(training_data, f)
+                ax.clear()
                     
     # close figure when finished
     plt.close(fig)
@@ -886,7 +922,7 @@ def load_labels(train_sites, settings, Recalc=False, CoastOnly=False):
         filepath = os.path.join(filepath_train,sitename)
         if os.path.exists(filepath):
             # FM: faster way to get just pkl files
-            list_files_pkl = glob.glob(filepath+'/*.pkl') 
+            list_files_pkl = glob.glob(os.path.join(filepath, '*', '*.pkl'))
         else:
             continue
         # load and append the training data to the features dict
@@ -1196,6 +1232,8 @@ def evaluate_classifier(classifier, metadata, polygon, Sat, settings):
             pixel_size = 15
         elif satname == 'S2':
             pixel_size = 10
+        elif satname == 'PSScene4Band':
+            pixel_size = 3
         # convert settings['min_beach_area'] and settings['buffer_size'] from metres to pixels
         buffer_size_pixels = np.ceil(settings['buffer_size']/pixel_size)
         min_beach_area_pixels = np.ceil(settings['min_beach_area']/pixel_size**2)
@@ -1223,8 +1261,10 @@ def evaluate_classifier(classifier, metadata, polygon, Sat, settings):
             if cloud_cover > settings['cloud_thresh']:
                 continue
             # calculate a buffer around the reference shoreline (if any has been digitised)
+            image_epsg = metadata[satname]['epsg'][i]
+
             im_ref_buffer = Shoreline.create_shoreline_buffer(cloud_mask.shape, georef, image_epsg,
-                                                    pixel_size, settings)
+                                                  pixel_size, settings, image_epsg)
             # classify image in 4 classes (sand, whitewater, water, other) with NN classifier
             im_classif, im_labels = Shoreline.classify_image_NN(im_ms, im_extra, cloud_mask,
                                     min_beach_area_pixels, classifier)

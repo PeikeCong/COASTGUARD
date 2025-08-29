@@ -492,6 +492,7 @@ def get_filepath(inputs,satname):
         filepath20 = os.path.join(filepath_data, sitename, satname, '20m')
         filepath60 = os.path.join(filepath_data, sitename, satname, '60m')
         filepath = [filepath10, filepath20, filepath60]
+      
             
     return filepath
     
@@ -529,7 +530,8 @@ def get_filenames(filename, filepath, satname):
         fn = [os.path.join(filepath[0], filename),
               os.path.join(filepath[1], filename20),
               os.path.join(filepath[2], filename60)]
-        
+    elif satname == 'PSScene4Band':
+        fn = [os.path.join(filepath[0], filename)]
     return fn
 
 def merge_output(output):
