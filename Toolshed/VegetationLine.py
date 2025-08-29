@@ -243,6 +243,11 @@ def extract_veglines(metadata, settings, polygon, dates, savetifs=True):
             # save classified image and transition zone mask after classification takes place
             Image_Processing.save_ClassIm(im_classif, im_labels, cloud_mask, georef, filenames[fn], settings)
             Image_Processing.save_TZone(im_ms, im_labels, cloud_mask, im_ref_buffer, georef, filenames[fn], settings)
+            Image_Processing.save_ClassIm_categorical_geotiff(im_classif, sh_classif, cloud_mask, georef, filenames[fn], settings)
+
+
+
+
                 
             # compute NDVI image (NIR-R)
             im_ndvi = Toolbox.nd_index(im_ms[:,:,3], im_ms[:,:,2], cloud_mask)
@@ -1483,6 +1488,16 @@ def BufferShoreline(settings,refline,georef,cloud_mask):
         Array with same dimensions as sat image, with True where buffered reference shoreline exists.
 
     """
+    # New - if no ref
+    if refline is None:
+        # Prefer AOI if provided and shape-compatible; otherwise allow whole image.
+        aoi_mask = settings.get('aoi_mask', None)
+        if aoi_mask is not None and getattr(aoi_mask, 'shape', None) == cloud_mask.shape:
+            im_buffer = aoi_mask & (~cloud_mask.astype(bool))
+        else:
+            im_buffer = ~cloud_mask.astype(bool)
+        return im_buffer
+        
     if type(refline) == np.ndarray:
         refGS = Toolbox.ArrtoGS(refline, georef)
     else: # if refline is read in as shapefile

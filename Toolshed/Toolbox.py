@@ -1727,6 +1727,8 @@ def AOI_from_file(sitename):
         First coordinate of the polygon (for Earth Engine if needed)
     gdf : GeoDataFrame
         Full AOI as GeoDataFrame
+    lonmin, lonmax, latmin, latmax : float
+        Bounding box of the AOI in WGS84
     """
     geojson_path = f"./Data/ROIs/{sitename}.geojson"
     if not os.path.exists(geojson_path):
@@ -1745,7 +1747,11 @@ def AOI_from_file(sitename):
     from ee import Geometry
     point = Geometry.Point(polygon[0][0])
 
-    return polygon, point, gdf
+    # Bounding box
+    lonmin, latmin, lonmax, latmax = gdf.total_bounds  # (minx, miny, maxx, maxy)
+
+    return polygon, point, gdf, lonmin, lonmax, latmin, latmax
+
 
 
 def AOI(lonmin, lonmax, latmin, latmax, sitename):

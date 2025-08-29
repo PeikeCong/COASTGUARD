@@ -32,6 +32,10 @@ import ee
 import geemap
 import glob
 from datetime import datetime, timezone
+import os
+import numpy as np
+import rasterio
+from rasterio.transform import from_origin
 
 # CoastSat modules
 from Toolshed import Toolbox
@@ -870,6 +874,100 @@ def ClipIndexVec(cloud_mask, im_ndi, im_labels, im_ref_buffer):
     else:
         return None, None
             
+# New veg and water classes map tif
+import os
+import numpy as np
+import rasterio
+from rasterio.transform import from_origin
+
+def save_ClassIm_categorical_geotiff(
+    im_classif,          # habitat labels; only need veg flag
+    sh_classif,          # shore labels: 0=Other, 1=Sand, 2=Whitewater, 3=Water
+    cloud_mask,
+    georef, filenames, settings,
+    # habitat code (set to your veg code in im_classif)
+    HAB_VEG=1,
+    # shore codes (as per your shore NN)
+    SH_SAND=1, SH_WHITEWATER=2, SH_WATER=3,
+    # output class codes
+    code_veg=1, code_nonveg=2, code_water=3, code_sand=4, code_whitewater=5,
+    nodata_val=255, write_colormap=True
+):
+    """
+    ONE-BAND categorical GeoTIFF (pixel classes) with precedence:
+      Base: veg/non-veg  -> then Water -> then Sand -> then Whitewater (topmost)
+    """
+    print("\nSaving categorical (veg/non-veg base + water + sand + whitewater) for", filenames)
+
+    # paths
+    tifname = filenames.rsplit('/', 1)[1]
+    if tifname.endswith('.tif'): tifname = tifname[:-4]
+    out_dir = os.path.join(settings['inputs']['filepath'], settings['inputs']['sitename'], 'img_files')
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{tifname}_CLASSIFIED.tif")
+
+    # georef
+    transform = from_origin(georef[0], georef[3], georef[1], georef[1])
+
+    H, W = im_classif.shape
+    assert sh_classif.shape == (H, W)
+    assert cloud_mask.shape == (H, W)
+
+    # Base: veg vs non-veg
+    out = np.where(im_classif == HAB_VEG, code_nonveg, code_veg).astype(np.uint8)
+
+
+    # Overlays in requested order (each step overrides previous where true):
+    # 1) Water over base
+    out[sh_classif == SH_WATER] = code_water
+    # 2) Sand over water/base
+    out[sh_classif == SH_SAND] = code_sand
+    # 3) Whitewater over sand/water/base (topmost)
+    out[sh_classif == SH_WHITEWATER] = code_whitewater
+
+    # Clouds -> NoData
+    if nodata_val is not None:
+        out[cloud_mask] = nodata_val
+
+    with rasterio.open(
+        out_path, 'w',
+        driver='GTiff',
+        height=H, width=W, count=1,
+        dtype=rasterio.uint8,
+        crs='EPSG:' + str(settings['output_epsg']),
+        transform=transform,
+        nodata=nodata_val,
+        tiled=True, compress='DEFLATE', predictor=2
+    ) as dst:
+        dst.write(out, 1)
+        if write_colormap:
+            # greys for base; overlays colored
+            cmap = {
+                0: (0, 0, 0, 0),                # unused
+                code_veg:        (90, 90, 90, 255),     # Vegetation (dark grey)
+                code_nonveg:     (200, 200, 200, 255),  # Non-veg (light grey)
+                code_water:      (0, 120, 255, 255),    # Water (blue)
+                code_sand:       (255, 235, 130, 255),  # Sand (soft yellow)
+                code_whitewater: (255, 255, 255, 255),  # Whitewater (white)
+                # nodata (255) stays transparent
+            }
+            dst.write_colormap(1, cmap)
+        dst.update_tags(
+            CLASS_CODES=str({
+                "Vegetation": code_veg,
+                "NonVegetation": code_nonveg,
+                "Water": code_water,
+                "Sand": code_sand,
+                "WhiteWater": code_whitewater
+            }),
+            OVERLAY_ORDER="Base(veg/non-veg) -> Water -> Sand -> Whitewater",
+            SOURCE_BASE=tifname
+        )
+
+    print(" -> Saved:", out_path)
+    return out_path
+
+
 
 
 def save_RGB_NDVI(im_ms, cloud_mask, georef, filenames, settings):
